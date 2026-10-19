@@ -121,3 +121,22 @@ This log records binding architectural decisions, context, rationale, and conseq
 - **Decision**: Accepted ablation study findings (Run `run_20261019_194111_6f3330`). Adding resource usage (`ConsumedQuantity`) to cost autoregression yields a 25.84 percentage point WAPE reduction (87.99% $\rightarrow$ 62.15%, MASE 0.5113 $\rightarrow$ 0.3612). Champion XGBoost forecaster demonstrates a 55.7% error reduction over Seasonal Naive baseline (62.15% vs 140.15%). Champion Rolling Threshold detector achieves 0.10% FPR overall (0.14% peak, 0.08% off-peak, clearing $\le 1.0\%$ robustness criteria). Circularity caveat for synthetic event features documented explicitly (A10.3).
 - **Consequences**: Clears all acceptance criteria for Phase 10 (A10.1, A10.2, A10.3). Unblocks Phase 11 (Interactive FinOps Streamlit Dashboard).
 
+---
+
+### DEC-014: Interactive FinOps Streamlit Dashboard Acceptance
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-20
+- **Context**: Phase 11 requires an interactive FinOps dashboard built with Streamlit adhering to FOCUS 1.0/1.3 standards. Governed by G3 (lightweight local execution, zero in-app training, GPU-free), A11.1 (graceful handling of missing/corrupt artifacts with loader unit tests), A11.2 (smoke validation across all views), and A11.3 (no hardcoded absolute paths, portable run discovery). All dashboard text must strictly use non-causal phrasing ("likely associated causes", "model evidence"). Quarantined test partition ($D_{\text{test}}$, Days 25–30) must remain strictly quarantined.
+- **Decision**: Implemented modular Streamlit dashboard in `app/`:
+  - `app/loaders.py`: Resilient discovery and ingestion of pipeline artifacts from `runs/` (or via `--run-dir`), returning typed structures and handling missing/corrupt files gracefully.
+  - `app/views/overview.py`: Executive Overview with FOCUS KPIs (Clean Spend, Synthetic Injected Spend, Total Anomaly Delta, Run Provenance matrix).
+  - `app/views/forecast_anomalies.py`: Time-series forecasting and rolling threshold anomaly alert inspection with per-service filtering.
+  - `app/views/attribution.py`: Root-cause attribution view displaying operational drivers with strict non-causal terminology.
+  - `app/views/explainability.py`: TreeSHAP global driver bars and executive audit narratives.
+  - `app/views/ablations.py`: 7-arm ablation comparison table with empirical variance reporting and synthetic event circularity caveat (A10.3).
+  - `app/main.py`: Streamlit entrypoint with dark executive theme and navigation sidebar.
+  - `docs/dashboard.md`: Complete architecture and operator guide.
+  - `tests/test_app_loaders.py`: 8 unit tests covering normal discovery, missing directories, corrupt JSON/CSV files, and no hardcoded absolute paths (101 total unit tests passing in pytest).
+- **Consequences**: Clears all acceptance criteria for Phase 11 (A11.1, A11.2, A11.3). Unblocks Phase 12 (Integration, Packaging, and QA).
+
+

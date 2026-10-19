@@ -44,3 +44,7 @@ addopts = "-ra -q"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+[tool.ruff.lint]
+ignore = ["BLE001"]
+
