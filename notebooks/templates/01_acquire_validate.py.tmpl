@@ -40,16 +40,20 @@ REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
 # Clone if running on fresh Colab runtime
 if not os.path.exists("src/driftsense"):
-    print("Cloning repository in Google Colab...")
-    subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
-    os.chdir("repo")
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
     if PINNED_COMMIT_SHA != "main":
         subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
 
 # Install driftsense package and dependencies
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "."], check=True)
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
 if os.path.exists("requirements-colab.txt"):
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-colab.txt"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
 
 print("Environment setup complete.")
 
