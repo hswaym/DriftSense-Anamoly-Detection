@@ -112,3 +112,12 @@ This log records binding architectural decisions, context, rationale, and conseq
 - **Decision**: TreeSHAP explainer implemented and verified on Colab (Run `run_20261019_185103_26be50`). Additivity verified on all 4,983 validation records. Seed stability across 3 runs achieved mean Spearman $\rho = 0.9044$ and Kendall $\tau = 0.7707$. Global drivers identify `BilledCost` (49.67%), `ConsumedQuantity` (7.35%), `EffectiveCost_roll_mean_168h` (4.92%), `day_of_month` (3.99%), and `hour_of_day` (3.55%). Non-causal audit narratives generated with strict association phrasing.
 - **Consequences**: Clears all requirements for Phase 9 and provides foundational explanation capabilities for Phase 10 controlled experiments and Phase 11 interactive dashboard.
 
+---
+
+### DEC-013: Controlled Experiments & Ablations Acceptance (Empirical Variance & Feature Lift)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-19
+- **Context**: Controlled experimental arms and ablations evaluated on validation partition ($D_{\text{val}}$, Days 16–24) across 3 random seeds (`[42, 123, 999]`) per frozen protocol `docs/experiment_protocol.md` (hash `b3d6945e90c46d76310241a2168c7e9e8e8e506589d17e4cb878d547e47dfe7e`), verifying variance, feature family contributions, and regime robustness without test partition leakage ($D_{\text{test}}$ quarantined).
+- **Decision**: Accepted ablation study findings (Run `run_20261019_194111_6f3330`). Adding resource usage (`ConsumedQuantity`) to cost autoregression yields a 25.84 percentage point WAPE reduction (87.99% $\rightarrow$ 62.15%, MASE 0.5113 $\rightarrow$ 0.3612). Champion XGBoost forecaster demonstrates a 55.7% error reduction over Seasonal Naive baseline (62.15% vs 140.15%). Champion Rolling Threshold detector achieves 0.10% FPR overall (0.14% peak, 0.08% off-peak, clearing $\le 1.0\%$ robustness criteria). Circularity caveat for synthetic event features documented explicitly (A10.3).
+- **Consequences**: Clears all acceptance criteria for Phase 10 (A10.1, A10.2, A10.3). Unblocks Phase 11 (Interactive FinOps Streamlit Dashboard).
+
