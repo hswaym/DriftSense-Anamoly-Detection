@@ -103,3 +103,12 @@ This log records binding architectural decisions, context, rationale, and conseq
 - **Decision**: Temporal Correlation Attributor and XGBoost Attributor both achieved 100.0% Top-1, Top-2, and Top-3 accuracy on validation incidents (Run `run_20261019_181013_7bab3d`), effectively rejecting benign background decoy operations. Temporal Correlation selected as primary champion for transparent, zero-hyperparameter interpretability, with XGBoost preserved for multi-modal telemetry jumps.
 - **Consequences**: Feeds directly into Phase 9 (Explainability / SHAP) and Phase 10 (Interactive FinOps Dashboard).
 
+---
+
+### DEC-012: Explainability Engine & TreeSHAP Verification (TreeSHAP with Stability & Non-Causal Narratives)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-19
+- **Context**: Model explainability required for the champion forecaster and anomaly explanations under FinOps FOCUS standard, requiring mathematical additivity (A9.1), rank stability across random seeds, and non-causal executive audit reporting (A9.2) without test data leakage (A9.3).
+- **Decision**: TreeSHAP explainer implemented and verified on Colab (Run `run_20261019_185103_26be50`). Additivity verified on all 4,983 validation records. Seed stability across 3 runs achieved mean Spearman $\rho = 0.9044$ and Kendall $\tau = 0.7707$. Global drivers identify `BilledCost` (49.67%), `ConsumedQuantity` (7.35%), `EffectiveCost_roll_mean_168h` (4.92%), `day_of_month` (3.99%), and `hour_of_day` (3.55%). Non-causal audit narratives generated with strict association phrasing.
+- **Consequences**: Clears all requirements for Phase 9 and provides foundational explanation capabilities for Phase 10 controlled experiments and Phase 11 interactive dashboard.
+
