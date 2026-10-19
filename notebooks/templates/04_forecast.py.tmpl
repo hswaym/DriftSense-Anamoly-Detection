@@ -1,0 +1,388 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 04: Expected-Cost Forecasting & Baseline Benchmarking
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~1-3 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Model Checkpoints: `runs/<run_id>/models/{seasonal_naive,moving_average,exponential_smoothing,xgboost}.joblib`  
+# - Validation Metrics Report: `runs/<run_id>/val_forecast_metrics.json`  
+# - Validation Predictions Matrix: `runs/<run_id>/val_forecast_predictions.csv`  
+# - Comparative Forecast Visualization: `runs/<run_id>/forecast_comparison.png`  
+# - Cryptographically Verified Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL EVALUATION & ISOLATION INVARIANTS (G6 & A6.4):**  
+# > - **A6.4 Test Partition Quarantine:** The test partition ($D_{\text{test}}$, Days 25–30) is strictly locked and quarantined. Model selection and hyperparameter evaluation occur exclusively on validation ($D_{\text{val}}$, Days 19–24). The run manifest MUST NOT contain test predictions.  
+# > - **Scale-Independent Metric Selection:** Cloud billing data contains 99.38% exact zeros. Primary model selection is governed by **WAPE** and **sMAPE** to prevent infinite error penalties on near-zero actuals.  
+# > - **Target Log-Transform:** Due to extreme right-tail skewness (kurtosis > 250, skew > 13), XGBoost utilizes `log1p` target stabilization.
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+
+# Install driftsense package and dependencies
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+MODELS_DIR = RUN_DIR / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+print(f"Models Directory:     {MODELS_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Configuration & Dataset Split Verification
+
+# %%
+import json
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.data.acquire import acquire_dataset
+from driftsense.eval.splits import chronological_split
+from driftsense.features.builder import FeaturePipeline
+
+CONFIG_PATH = "configs/forecast_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg.get("dataset", {})
+models_cfg = cfg.get("models", {})
+eval_cfg = cfg.get("evaluation", {})
+
+train_path = Path(dataset_cfg.get("train_path", "data/splits/train_features.csv"))
+val_path = Path(dataset_cfg.get("val_path", "data/splits/val_features.csv"))
+
+# Verify or regenerate feature splits if running in a fresh workspace
+if not train_path.is_file() or not val_path.is_file():
+    print("Feature splits not detected locally. Regenerating from pipeline...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+    
+    train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
+    pipeline = FeaturePipeline()
+    pipeline.fit(train_df)
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+    
+    train_path.parent.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(train_path, index=False)
+    val_feats.to_csv(val_path, index=False)
+    test_feats.to_csv(train_path.parent / "test_features.csv", index=False)
+    print("Splits regenerated successfully.")
+
+# Load training and validation partitions
+print(f"Loading training features: {train_path}")
+df_train = pd.read_csv(train_path, low_memory=False)
+
+print(f"Loading validation features: {val_path}")
+df_val = pd.read_csv(val_path, low_memory=False)
+
+# Strict A6.4 Isolation Guard
+assert "test" not in str(val_path).lower(), "A6.4 VIOLATION: Test split passed into validation evaluator!"
+print(f"Train Partition: {len(df_train):,} rows ({df_train['ServiceName'].nunique()} services)")
+print(f"Val Partition:   {len(df_val):,} rows ({df_val['ServiceName'].nunique()} services)")
+
+target_col = dataset_cfg.get("target_col", "EffectiveCost")
+time_col = dataset_cfg.get("time_col", "ChargePeriodStart")
+service_col = dataset_cfg.get("service_col", "ServiceName")
+primary_metric = eval_cfg.get("primary_metric", "wape")
+
+y_train = df_train[target_col].to_numpy(dtype=float)
+y_val = df_val[target_col].to_numpy(dtype=float)
+
+# %% [markdown]
+# ## 5. Model Training & Serialization
+
+# %%
+from driftsense.forecast.naive import SeasonalNaiveForecaster, MovingAverageForecaster
+from driftsense.forecast.smoothing import ExponentialSmoothingForecaster
+from driftsense.forecast.xgb import XGBoostForecaster
+from driftsense.eval.metrics import compute_all_metrics
+
+models = [
+    SeasonalNaiveForecaster(
+        name="seasonal_naive",
+        seasonality=models_cfg.get("seasonal_naive", {}).get("seasonality", 24),
+        config=models_cfg.get("seasonal_naive", {}),
+    ),
+    MovingAverageForecaster(
+        name="moving_average",
+        window=models_cfg.get("moving_average", {}).get("window", 24),
+        config=models_cfg.get("moving_average", {}),
+    ),
+    ExponentialSmoothingForecaster(
+        name="exponential_smoothing",
+        alpha=models_cfg.get("exponential_smoothing", {}).get("alpha", 0.25),
+        config=models_cfg.get("exponential_smoothing", {}),
+    ),
+    XGBoostForecaster(
+        name="xgboost",
+        n_estimators=models_cfg.get("xgboost", {}).get("n_estimators", 150),
+        max_depth=models_cfg.get("xgboost", {}).get("max_depth", 5),
+        learning_rate=models_cfg.get("xgboost", {}).get("learning_rate", 0.05),
+        subsample=models_cfg.get("xgboost", {}).get("subsample", 0.8),
+        colsample_bytree=models_cfg.get("xgboost", {}).get("colsample_bytree", 0.8),
+        device=models_cfg.get("xgboost", {}).get("device", "cpu"),
+        seed=models_cfg.get("xgboost", {}).get("seed", 42),
+        log_transform=models_cfg.get("xgboost", {}).get("log_transform", True),
+        config=models_cfg.get("xgboost", {}),
+    ),
+]
+
+saved_checkpoints = []
+predictions_dict = {
+    time_col: df_val[time_col],
+    service_col: df_val[service_col],
+    f"{target_col}_actual": y_val,
+}
+model_results = {}
+
+print("=== Fitting Forecasters on D_train ===")
+for i, model in enumerate(models, 1):
+    print(f"\n[{i}/{len(models)}] Fitting {model.name}...")
+    model.fit(
+        df_train,
+        target_col=target_col,
+        time_col=time_col,
+        service_col=service_col,
+    )
+    
+    # Validation inference
+    preds = model.predict(df_val)
+    predictions_dict[f"{target_col}_pred_{model.name}"] = preds
+    
+    # Compute metrics
+    m = compute_all_metrics(y_true=y_val, y_pred=preds, y_train=y_train)
+    model_results[model.name] = {
+        "metrics": m,
+        "metadata": model.get_metadata(),
+    }
+    
+    # Serialize checkpoint
+    chk_path = model.save(MODELS_DIR)
+    saved_checkpoints.append(str(chk_path))
+    print(f"    Checkpointed: {chk_path.name} (SHA256: {model.config_hash[:16]}...)")
+
+# %% [markdown]
+# ## 6. Validation Evaluation & Champion Selection
+
+# %%
+print("\n" + "=" * 80)
+print("DRIFTSENSE — VALIDATION FORECASTING BENCHMARK RESULTS")
+print("=" * 80)
+header = f"{'Model':<25} | {'MAE ($)':<10} | {'RMSE ($)':<10} | {'sMAPE (%)':<10} | {'WAPE (%)':<10} | {'MASE':<8}"
+print(header)
+print("-" * len(header))
+
+for name, res in model_results.items():
+    m = res["metrics"]
+    print(
+        f"{name:<25} | {m['mae']:<10.4f} | {m['rmse']:<10.4f} | {m['smape']:<10.2f} | {m['wape']:<10.2f} | {m['mase']:<8.4f}"
+    )
+
+champion_name = min(
+    model_results.keys(),
+    key=lambda k: model_results[k]["metrics"].get(primary_metric, float("inf")),
+)
+print("=" * 80)
+print(f"CHAMPION MODEL SELECTED: '{champion_name}' (Lowest {primary_metric.upper()} on D_val)")
+print("=" * 80)
+
+# Save validation predictions matrix
+val_preds_df = pd.DataFrame(predictions_dict)
+val_preds_path = RUN_DIR / "val_forecast_predictions.csv"
+val_preds_df.to_csv(val_preds_path, index=False)
+print(f"\nSaved validation predictions to: {val_preds_path}")
+
+# Save validation metrics JSON
+metrics_payload = {
+    "run_id": RUN_ID,
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "primary_metric": primary_metric,
+    "champion_model": champion_name,
+    "training_rows": len(df_train),
+    "validation_rows": len(df_val),
+    "models": model_results,
+}
+val_metrics_path = RUN_DIR / "val_forecast_metrics.json"
+with open(val_metrics_path, "w", encoding="utf-8") as f:
+    json.dump(metrics_payload, f, indent=2)
+print(f"Saved validation metrics to:    {val_metrics_path}")
+
+# %% [markdown]
+# ## 7. Comparative Forecast Visualization
+
+# %%
+import matplotlib.pyplot as plt
+
+top_services = (
+    df_val.groupby(service_col)[target_col]
+    .sum()
+    .sort_values(ascending=False)
+    .head(3)
+    .index.tolist()
+)
+
+fig, axes = plt.subplots(len(top_services), 1, figsize=(14, 4 * len(top_services)), sharex=False)
+if len(top_services) == 1:
+    axes = [axes]
+
+for ax, svc in zip(axes, top_services):
+    mask = df_val[service_col] == svc
+    svc_val = df_val[mask].sort_values(by=time_col)
+    t = pd.to_datetime(svc_val[time_col], utc=True)
+    
+    ax.plot(t, svc_val[target_col], label="Actual Cost ($)", color="black", linewidth=2.0)
+    for model_name in model_results.keys():
+        pred_col = f"{target_col}_pred_{model_name}"
+        if pred_col in val_preds_df.columns:
+            svc_preds = val_preds_df.loc[mask].sort_values(by=time_col)[pred_col]
+            style = "--" if model_name == champion_name else ":"
+            lw = 2.0 if model_name == champion_name else 1.2
+            ax.plot(t, svc_preds, linestyle=style, linewidth=lw, label=f"{model_name}")
+            
+    ax.set_title(f"Validation Forecast Horizon: {svc}", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Effective Cost ($)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", framealpha=0.9)
+
+plt.tight_layout()
+plot_path = RUN_DIR / "forecast_comparison.png"
+fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+plt.close(fig)
+print(f"Saved forecast visualization plot to: {plot_path}")
+
+# %% [markdown]
+# ## 8. Run Manifest Compilation & Anti-Leakage Audit
+
+# %%
+from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
+from driftsense.runtime.seed import set_seed
+
+set_seed(cfg.get("runtime", {}).get("seed", 42))
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_6",
+    stage="forecasting",
+    config_path=CONFIG_PATH,
+    seed=cfg.get("runtime", {}).get("seed", 42),
+)
+
+# Register dataset partitions
+builder.add_dataset(str(train_path))
+builder.add_dataset(str(val_path))
+
+# Register model checkpoints and evaluation artifacts
+for chk in saved_checkpoints:
+    builder.add_artifact(chk)
+builder.add_artifact(str(val_metrics_path))
+builder.add_artifact(str(val_preds_path))
+builder.add_artifact(str(plot_path))
+
+manifest_path = builder.save(RUN_DIR)
+print(f"\nManifest successfully emitted to: {manifest_path}")
+
+# Strict Anti-Leakage Audit (A6.4)
+manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+for art in manifest_data.get("artifacts", []):
+    path_str = art.get("path", "").lower()
+    assert "test_features" not in path_str, f"A6.4 LEAKAGE: Test split found in manifest artifacts: {path_str}"
+    assert "test_pred" not in path_str, f"A6.4 LEAKAGE: Test predictions found in manifest artifacts: {path_str}"
+
+print("PASS: A6.4 Anti-Leakage Invariant Verified (Zero test artifacts in manifest).")
+
+# Recompute and verify all artifact SHA256 hashes
+is_valid, errors = verify_manifest(RUN_DIR, require_datasets=True)
+if is_valid:
+    print("PASS: Run manifest verification succeeded (All SHA256 checksums verified).")
+else:
+    print(f"FAIL: Manifest verification failed: {errors}")
+    sys.exit(1)
+
+# %% [markdown]
+# ## 9. Artifact Archival & Download
+
+# %%
+import shutil
+
+zip_filename = f"{RUN_ID}.zip"
+zip_path = shutil.make_archive(RUN_ID, "zip", RUN_DIR)
+shutil.move(zip_path, zip_filename)
+print(f"\nRun artifacts successfully archived to: {zip_filename} ({os.path.getsize(zip_filename):,} bytes)")
+
+try:
+    from google.colab import files
+    print("Triggering browser download for Colab run archive...")
+    files.download(zip_filename)
+except ImportError:
+    print(f"Local environment: Run artifacts available at {RUN_DIR.resolve()}")

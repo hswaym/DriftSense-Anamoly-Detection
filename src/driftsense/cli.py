@@ -308,6 +308,200 @@ def cmd_features(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_forecast(args: argparse.Namespace) -> int:
+    """Train and evaluate baseline and ML forecasting models on train/val splits."""
+    import json
+    from pathlib import Path
+
+    import pandas as pd
+
+    from driftsense.eval.metrics import compute_all_metrics
+    from driftsense.forecast.base import BaseForecaster
+    from driftsense.forecast.naive import (
+        MovingAverageForecaster,
+        SeasonalNaiveForecaster,
+    )
+    from driftsense.forecast.smoothing import ExponentialSmoothingForecaster
+    from driftsense.forecast.xgb import XGBoostForecaster
+
+    cfg: dict = {}
+    if args.config:
+        loaded, _ = load_config(args.config)
+        cfg = loaded
+
+    ds_cfg = cfg.get("dataset", {})
+    models_cfg = cfg.get("models", {})
+    eval_cfg = cfg.get("evaluation", {})
+    out_cfg = cfg.get("output", {})
+
+    train_path = args.train or ds_cfg.get(
+        "train_path", "data/splits/train_features.csv"
+    )
+    val_path = args.val or ds_cfg.get("val_path", "data/splits/val_features.csv")
+    models_dir = Path(args.models_dir or out_cfg.get("models_dir", "models/forecast"))
+    metrics_path = Path(
+        args.metrics_out
+        or out_cfg.get("metrics_path", "metrics/val_forecast_metrics.json")
+    )
+    val_preds_path = Path(
+        args.predictions_out
+        or out_cfg.get(
+            "val_predictions_path", "data/predictions/val_forecast_predictions.csv"
+        )
+    )
+
+    if not Path(train_path).is_file():
+        print(f"ERROR: Train split not found at {train_path}", file=sys.stderr)
+        return 1
+    if not Path(val_path).is_file():
+        print(f"ERROR: Validation split not found at {val_path}", file=sys.stderr)
+        return 1
+
+    # Strict isolation check: ensure test split is never evaluated during Phase 6 (A6.4)
+    if "test" in str(val_path).lower():
+        print(
+            "ERROR: A6.4 Violation — Test split evaluation is strictly forbidden during Phase 6.",
+            file=sys.stderr,
+        )
+        return 1
+
+    target_col = ds_cfg.get("target_col", "EffectiveCost")
+    time_col = ds_cfg.get("time_col", "ChargePeriodStart")
+    service_col = ds_cfg.get("service_col", "ServiceName")
+    primary_metric = eval_cfg.get("primary_metric", "wape")
+
+    print(f"Loading training data from: {train_path}")
+    df_train = pd.read_csv(train_path, low_memory=False)
+    print(f"Loading validation data from: {val_path}")
+    df_val = pd.read_csv(val_path, low_memory=False)
+
+    print(f"Train rows: {len(df_train):,}, Validation rows: {len(df_val):,}")
+    print(f"Target column: {target_col}")
+
+    y_train = df_train[target_col].to_numpy(dtype=float)
+    y_val = df_val[target_col].to_numpy(dtype=float)
+
+    models_to_run: list[BaseForecaster] = []
+
+    if models_cfg.get("seasonal_naive", {}).get("enabled", True):
+        sn_cfg = models_cfg.get("seasonal_naive", {})
+        models_to_run.append(
+            SeasonalNaiveForecaster(
+                seasonality=sn_cfg.get("seasonality", 24),
+                config=sn_cfg,
+            )
+        )
+
+    if models_cfg.get("moving_average", {}).get("enabled", True):
+        ma_cfg = models_cfg.get("moving_average", {})
+        models_to_run.append(
+            MovingAverageForecaster(
+                window=ma_cfg.get("window", 24),
+                config=ma_cfg,
+            )
+        )
+
+    if models_cfg.get("exponential_smoothing", {}).get("enabled", True):
+        es_cfg = models_cfg.get("exponential_smoothing", {})
+        models_to_run.append(
+            ExponentialSmoothingForecaster(
+                alpha=es_cfg.get("alpha", 0.25),
+                config=es_cfg,
+            )
+        )
+
+    if models_cfg.get("xgboost", {}).get("enabled", True):
+        xgb_cfg = models_cfg.get("xgboost", {})
+        models_to_run.append(
+            XGBoostForecaster(
+                n_estimators=xgb_cfg.get("n_estimators", 150),
+                max_depth=xgb_cfg.get("max_depth", 5),
+                learning_rate=xgb_cfg.get("learning_rate", 0.05),
+                subsample=xgb_cfg.get("subsample", 0.8),
+                colsample_bytree=xgb_cfg.get("colsample_bytree", 0.8),
+                device=xgb_cfg.get("device", "cpu"),
+                seed=xgb_cfg.get("seed", 42),
+                log_transform=xgb_cfg.get("log_transform", True),
+                config=xgb_cfg,
+            )
+        )
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    val_preds_path.parent.mkdir(parents=True, exist_ok=True)
+
+    results: dict = {}
+    preds_dict: dict = {
+        time_col: df_val[time_col],
+        service_col: df_val[service_col],
+        f"{target_col}_actual": y_val,
+    }
+
+    print("\n=== Training & Evaluating Forecasting Models ===")
+    for i, model in enumerate(models_to_run, 1):
+        print(f"[{i}/{len(models_to_run)}] Fitting {model.name}...")
+        model.fit(
+            df_train,
+            target_col=target_col,
+            time_col=time_col,
+            service_col=service_col,
+        )
+        preds = model.predict(df_val)
+        preds_dict[f"{target_col}_pred_{model.name}"] = preds
+
+        model_metrics = compute_all_metrics(
+            y_true=y_val,
+            y_pred=preds,
+            y_train=y_train,
+        )
+        results[model.name] = {
+            "metrics": model_metrics,
+            "metadata": model.get_metadata(),
+        }
+
+        # Serialize model
+        saved_file = model.save(models_dir)
+        print(f"    Saved model checkpoint to: {saved_file}")
+
+    # Build comparison summary
+    print("\n=== Validation Forecast Evaluation Summary ===")
+    header = f"{'Model':<25} | {'MAE ($)':<10} | {'RMSE ($)':<10} | {'sMAPE (%)':<10} | {'WAPE (%)':<10} | {'MASE':<8}"
+    print(header)
+    print("-" * len(header))
+    for name, res in results.items():
+        m = res["metrics"]
+        print(
+            f"{name:<25} | {m['mae']:<10.4f} | {m['rmse']:<10.4f} | {m['smape']:<10.2f} | {m['wape']:<10.2f} | {m['mase']:<8.4f}"
+        )
+
+    # Champion selection
+    champion_name = min(
+        results.keys(),
+        key=lambda k: results[k]["metrics"].get(primary_metric, float("inf")),
+    )
+    print(
+        f"\nChampion Model Selected on Validation ({primary_metric}): '{champion_name}'"
+    )
+
+    summary_payload = {
+        "primary_metric": primary_metric,
+        "champion_model": champion_name,
+        "validation_rows": len(df_val),
+        "training_rows": len(df_train),
+        "models": results,
+    }
+
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)
+    print(f"Validation metrics report saved to: {metrics_path}")
+
+    df_preds = pd.DataFrame(preds_dict)
+    df_preds.to_csv(val_preds_path, index=False)
+    print(f"Validation predictions saved to: {val_preds_path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI Entry point."""
     parser = argparse.ArgumentParser(
@@ -389,6 +583,21 @@ def main(argv: list[str] | None = None) -> int:
         "--splits-dir", help="Directory to save train/val/test CSV splits"
     )
     p_feat.set_defaults(func=cmd_features)
+
+    # forecast
+    p_fc = subparsers.add_parser(
+        "forecast",
+        help="Train and evaluate expected-cost forecasting models on validation split",
+    )
+    p_fc.add_argument("--config", help="Path to forecast configuration YAML")
+    p_fc.add_argument("--train", help="Path to training features CSV")
+    p_fc.add_argument("--val", help="Path to validation features CSV")
+    p_fc.add_argument("--models-dir", help="Directory to save serialized models")
+    p_fc.add_argument("--metrics-out", help="Path to output validation metrics JSON")
+    p_fc.add_argument(
+        "--predictions-out", help="Path to output validation predictions CSV"
+    )
+    p_fc.set_defaults(func=cmd_forecast)
 
     parsed = parser.parse_args(argv)
     return parsed.func(parsed)

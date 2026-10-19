@@ -1,0 +1,51 @@
+# DriftSense — Cloud Cost Expected-Loss Forecasting Configuration
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Note: Test split (data/splits/test_features.csv) is strictly locked and excluded during Phase 6
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+
+models:
+  seasonal_naive:
+    enabled: true
+    seasonality: 24
+  moving_average:
+    enabled: true
+    window: 24
+  exponential_smoothing:
+    enabled: true
+    alpha: 0.25
+  xgboost:
+    enabled: true
+    n_estimators: 150
+    max_depth: 5
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    device: "cpu"
+    seed: 42
+    log_transform: true
+
+evaluation:
+  primary_metric: "wape"
+  tracked_metrics:
+    - "mae"
+    - "rmse"
+    - "mape"
+    - "smape"
+    - "wape"
+    - "mase"
+  mase_seasonality: 24
+
+output:
+  models_dir: "models/forecast"
+  metrics_path: "metrics/val_forecast_metrics.json"
+  val_predictions_path: "data/predictions/val_forecast_predictions.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_6"
+  stage: "forecasting"

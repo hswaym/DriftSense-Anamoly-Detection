@@ -94,6 +94,10 @@ class ManifestBuilder:
         self.dataset_sha256[path.as_posix()] = sha
         return sha
 
+    def add_dataset(self, file_path: str | Path) -> str:
+        """Alias for register_dataset_file."""
+        return self.register_dataset_file(file_path)
+
     def add_artifact(self, file_path: str | Path) -> dict[str, Any]:
         """Record an output artifact with sha256 checksum and byte size."""
         path = Path(file_path)
@@ -115,8 +119,11 @@ class ManifestBuilder:
         self.add_artifact(path)
         self.metrics_files.append(path.as_posix())
 
-    def build(self) -> dict[str, Any]:
-        """Finalize manifest dictionary."""
+    def build(self, output_dir: str | Path | None = None) -> dict[str, Any] | Path:
+        """Finalize manifest dictionary and optionally save to output_dir."""
+        if output_dir is not None:
+            return self.save(output_dir)
+
         finished_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
         return {
             "run_id": self.run_id,
@@ -206,6 +213,10 @@ def verify_manifest(
             rel_path = manifest_file.parent / art_path.name
             if rel_path.is_file():
                 art_path = rel_path
+            elif not require_datasets and (
+                art_path_str.startswith("data/") or "/data/" in art_path_str
+            ):
+                continue
             else:
                 errors.append(f"Artifact file not found: {art_path_str}")
                 continue
