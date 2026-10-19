@@ -82,11 +82,15 @@ class TreeSHAPExplainer:
         if hasattr(model, "model_") and model.model_ is not None:
             self.raw_model = model.model_
             if self.feature_names is None:
-                self.feature_names = getattr(model, "feature_names_", getattr(model, "feature_cols_", None))
+                self.feature_names = getattr(
+                    model, "feature_names_", getattr(model, "feature_cols_", None)
+                )
         elif hasattr(model, "model") and model.model is not None:
             self.raw_model = model.model
             if self.feature_names is None:
-                self.feature_names = getattr(model, "feature_names", getattr(model, "feature_cols", None))
+                self.feature_names = getattr(
+                    model, "feature_names", getattr(model, "feature_cols", None)
+                )
         else:
             self.raw_model = model
 
