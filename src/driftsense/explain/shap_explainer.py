@@ -81,12 +81,12 @@ class TreeSHAPExplainer:
         # Extract native tree model if wrapped inside DriftSense classes
         if hasattr(model, "model_") and model.model_ is not None:
             self.raw_model = model.model_
-            if self.feature_names is None and hasattr(model, "feature_names_"):
-                self.feature_names = model.feature_names_
+            if self.feature_names is None:
+                self.feature_names = getattr(model, "feature_names_", getattr(model, "feature_cols_", None))
         elif hasattr(model, "model") and model.model is not None:
             self.raw_model = model.model
-            if self.feature_names is None and hasattr(model, "feature_names"):
-                self.feature_names = model.feature_names
+            if self.feature_names is None:
+                self.feature_names = getattr(model, "feature_names", getattr(model, "feature_cols", None))
         else:
             self.raw_model = model
 

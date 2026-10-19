@@ -170,14 +170,16 @@ else:
     forecaster = XGBoostForecaster(n_estimators=100, max_depth=5, seed=42)
     forecaster.fit(df_train, target_col=target_col, time_col=time_col, service_col=service_col)
 
+feature_names = getattr(forecaster, "feature_names_", getattr(forecaster, "feature_cols_", []))
+
 # Initialize TreeSHAP explainer
 explainer = TreeSHAPExplainer(
     forecaster.model_,
-    feature_names=forecaster.feature_names_,
+    feature_names=feature_names,
     atol=exp_cfg.get("atol_additivity", 0.001),
 )
 
-X_val = df_val[forecaster.feature_names_]
+X_val = df_val[feature_names]
 print(f"Computing TreeSHAP feature attributions on validation set ({len(X_val):,} rows)...")
 shap_values = explainer.explain(X_val, check_additivity=True)
 
@@ -196,7 +198,7 @@ print(f"PASS: A9.1 Additivity Invariant Verified. Max Discrepancy = {max_additiv
 import matplotlib.pyplot as plt
 from driftsense.explain.importance import compute_global_importance
 
-imp_df = compute_global_importance(shap_values, forecaster.feature_names_, model=forecaster.model_)
+imp_df = compute_global_importance(shap_values, feature_names, model=forecaster.model_)
 importance_path = RUN_DIR / "global_feature_importance.csv"
 imp_df.to_csv(importance_path, index=False)
 print(f"Saved global feature importance ranking to: {importance_path}")
@@ -286,7 +288,7 @@ print("\n=== Generating Executive FinOps Audit Narratives ===")
 for rank, idx in enumerate(top_anomaly_idxs, 1):
     row = df_val.iloc[idx]
     pred_id = f"anom_case_{rank}"
-    exp = explainer.explain_instance(row[forecaster.feature_names_], prediction_id=pred_id, top_k=5)
+    exp = explainer.explain_instance(row[feature_names], prediction_id=pred_id, top_k=5)
     instance_explanations.append(exp.to_dict())
 
     svc = str(row[service_col])

@@ -59,6 +59,11 @@ class XGBoostForecaster(BaseForecaster):
         self.feature_cols_: list[str] = []
         self.feature_importances_: dict[str, float] = {}
 
+    @property
+    def feature_names_(self) -> list[str]:
+        """Convenience alias for feature_cols_."""
+        return self.feature_cols_
+
     def fit(
         self,
         df_train: pd.DataFrame,
