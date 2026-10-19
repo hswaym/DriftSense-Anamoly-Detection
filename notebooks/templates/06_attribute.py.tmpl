@@ -385,6 +385,7 @@ builder = ManifestBuilder(
     phase="PHASE_8",
     stage="cause_attribution",
     config_path=CONFIG_PATH,
+    config_sha256=config_sha256,
     seed=cfg.get("runtime", {}).get("seed", 42),
 )
 
