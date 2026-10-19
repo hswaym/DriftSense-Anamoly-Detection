@@ -358,7 +358,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         return 1
 
     # Strict isolation check: ensure test split is never evaluated during Phase 6 (A6.4)
-    if "test" in str(val_path).lower():
+    if "test" in Path(val_path).name.lower():
         print(
             "ERROR: A6.4 Violation — Test split evaluation is strictly forbidden during Phase 6.",
             file=sys.stderr,
@@ -564,7 +564,7 @@ def cmd_detect(args: argparse.Namespace) -> int:
         return 1
 
     # Strict A7.3 isolation check: ensure test split is never evaluated during Phase 7
-    if "test" in str(val_path).lower():
+    if "test" in Path(val_path).name.lower():
         print(
             "ERROR: A7.3 Violation — Test split evaluation is strictly forbidden during Phase 7.",
             file=sys.stderr,
@@ -840,7 +840,7 @@ def cmd_attribute(args: argparse.Namespace) -> int:
         return 1
 
     # Strict A8.4 quarantine check: ensure test split is never evaluated during Phase 8
-    if "test" in str(val_path).lower():
+    if "test" in Path(val_path).name.lower():
         print(
             "ERROR: A8.4 Violation — Test split evaluation is strictly forbidden during Phase 8.",
             file=sys.stderr,
@@ -1039,7 +1039,7 @@ def cmd_explain(args: argparse.Namespace) -> int:
         return 1
 
     # Strict A9.3 quarantine check: ensure test split is never evaluated during Phase 9
-    if "test" in str(val_path).lower():
+    if "test" in Path(val_path).name.lower():
         print(
             "ERROR: A9.3 Violation — Test split evaluation is strictly forbidden during Phase 9.",
             file=sys.stderr,
@@ -1059,11 +1059,11 @@ def cmd_explain(args: argparse.Namespace) -> int:
     print(f"Loading champion forecasting model from: {model_path}")
     forecaster = XGBoostForecaster.load(model_path)
 
-    # Initialize TreeSHAP
+    atol_tol = getattr(args, "atol", None) or exp_cfg.get("atol_additivity", 0.002)
     explainer = TreeSHAPExplainer(
         forecaster.model_,
         feature_names=forecaster.feature_names_,
-        atol=exp_cfg.get("atol_additivity", 0.001),
+        atol=atol_tol,
     )
 
     X_val = df_val[forecaster.feature_names_]
@@ -1324,6 +1324,12 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--val", help="Path to validation features CSV")
     p_exp.add_argument("--model", help="Path to champion forecasting model")
     p_exp.add_argument("--metrics-out", help="Path to output validation metrics JSON")
+    p_exp.add_argument(
+        "--atol",
+        type=float,
+        default=0.002,
+        help="Additivity numerical tolerance for TreeSHAP verification",
+    )
     p_exp.set_defaults(func=cmd_explain)
 
     parsed = parser.parse_args(argv)

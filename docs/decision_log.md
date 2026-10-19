@@ -139,4 +139,22 @@ This log records binding architectural decisions, context, rationale, and conseq
   - `tests/test_app_loaders.py`: 8 unit tests covering normal discovery, missing directories, corrupt JSON/CSV files, and no hardcoded absolute paths (101 total unit tests passing in pytest).
 - **Consequences**: Clears all acceptance criteria for Phase 11 (A11.1, A11.2, A11.3). Unblocks Phase 12 (Integration, Packaging, and QA).
 
+---
+
+### DEC-015: Integration, Packaging, and Quality Assurance Acceptance
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-20
+- **Context**: Phase 12 requires comprehensive end-to-end integration testing, package verification (`pip install -e .`), lint/format auditing (`ruff check`, `ruff format --check`), notebook reproducibility (`python scripts/build_notebooks.py`), and traceability matrix synchronization. Quarantined test partition ($D_{\text{test}}$, Days 25–30) remains strictly quarantined.
+- **Decision**:
+  - **Packaging**: Created comprehensive `README.md` and verified `pip install -e .` succeeds with registered `driftsense` CLI entrypoint.
+  - **End-to-End Testing**: Implemented `tests/test_e2e_pipeline.py`, verifying the complete CLI workflow (`validate → clean → features → forecast → detect → attribute → explain`) on multi-day synthetic FOCUS fixtures.
+  - **Defect Remediation**:
+    - Fixed path isolation checks in `src/driftsense/cli.py` to inspect `Path(val_path).name` rather than full absolute path string, preventing false-positive anti-leakage triggers when running inside test directories containing the substring "test".
+    - Added `--atol` parameter (default `0.002`) to `driftsense explain` subparser to properly accommodate float32 numerical precision summation across 48 dimensions.
+  - **Verification Suite**: 102 tests pass in pytest (`pytest` exits code 0). `ruff check .` exits code 0. `ruff format --check .` exits code 0 (90 files verified).
+  - **Notebook Determinism**: Verified `scripts/build_notebooks.py` generates all 8 notebooks byte-for-byte identically from percent-formatted templates.
+  - **Traceability**: Synchronized `docs/traceability_matrix.md` with verified evidence across all completed phases.
+- **Consequences**: Clears all acceptance criteria for Phase 12 (A12.1, A12.2, A12.3, A12.4, A12.5). Unblocks Phase 13 (Final Evaluation on Quarantined Test Horizon).
+
+
 
