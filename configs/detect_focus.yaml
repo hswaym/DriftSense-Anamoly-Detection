@@ -1,0 +1,62 @@
+# DriftSense — Anomaly Detection Configuration
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Note: Test split (data/splits/test_features.csv) is strictly locked and quarantined during Phase 7
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+  forecast_model_path: "runs/run_20261019_172039_9dc09a/models/xgboost.joblib"
+
+synthetic:
+  enabled: true
+  seed: 42
+  injection_rate: 0.03
+  min_duration_hours: 2
+  max_duration_hours: 6
+  multiplier_range:
+    - 1.5
+    - 3.5
+  sigma_range:
+    - 2.5
+    - 5.0
+
+detectors:
+  zscore:
+    enabled: true
+    threshold: 3.0
+    per_service: true
+    one_sided: true
+  rolling_threshold:
+    enabled: true
+    window: 24
+    threshold: 3.0
+  iforest:
+    enabled: true
+    n_estimators: 100
+    contamination: 0.03
+    threshold: 0.55
+    seed: 42
+  ocsvm:
+    enabled: true
+    kernel: "rbf"
+    nu: 0.03
+    gamma: "scale"
+    threshold: 0.0
+
+evaluation:
+  primary_metric: "event_f1"
+  tune_thresholds_on_val: true
+
+output:
+  detectors_dir: "models/detect"
+  metrics_path: "metrics/val_detect_metrics.json"
+  val_detections_path: "data/predictions/val_detections.csv"
+  labels_path: "data/labels/val_anomaly_labels.json"
+  events_path: "data/events/val_operational_events.json"
+
+runtime:
+  seed: 42
+  phase: "PHASE_7"
+  stage: "anomaly_detection"

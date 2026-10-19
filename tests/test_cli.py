@@ -83,3 +83,18 @@ def test_cli_forecast_isolation_rejects_test_split(tmp_path: Path):
 
     code = main(["forecast", "--train", str(fake_train), "--val", str(fake_test)])
     assert code == 1
+
+
+def test_cli_detect_isolation_rejects_test_split(tmp_path: Path):
+    """Verify CLI rejects running detect evaluation on test split (A7.3)."""
+    fake_train = tmp_path / "train.csv"
+    fake_test = tmp_path / "test_features.csv"
+    fake_train.write_text(
+        "ChargePeriodStart,ServiceName,EffectiveCost\n", encoding="utf-8"
+    )
+    fake_test.write_text(
+        "ChargePeriodStart,ServiceName,EffectiveCost\n", encoding="utf-8"
+    )
+
+    code = main(["detect", "--train", str(fake_train), "--val", str(fake_test)])
+    assert code == 1

@@ -502,6 +502,295 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_detect(args: argparse.Namespace) -> int:
+    """Train and evaluate statistical and ML anomaly detectors on validation split."""
+    import json
+    from pathlib import Path
+
+    import numpy as np
+    import pandas as pd
+
+    from driftsense.detect.base import BaseAnomalyDetector
+    from driftsense.detect.iforest import IsolationForestDetector
+    from driftsense.detect.ocsvm import OneClassSVMDetector
+    from driftsense.detect.rolling_threshold import RollingThresholdDetector
+    from driftsense.detect.zscore import ZScoreDetector
+    from driftsense.eval.detection_metrics import (
+        event_level_metrics,
+        point_level_metrics,
+        stratified_fp_analysis,
+    )
+    from driftsense.forecast.xgb import XGBoostForecaster
+    from driftsense.synth.injector import SyntheticInjector
+
+    cfg: dict = {}
+    if args.config:
+        loaded, _ = load_config(args.config)
+        cfg = loaded
+
+    ds_cfg = cfg.get("dataset", {})
+    synth_cfg = cfg.get("synthetic", {})
+    det_cfg = cfg.get("detectors", {})
+    eval_cfg = cfg.get("evaluation", {})
+    out_cfg = cfg.get("output", {})
+
+    train_path = args.train or ds_cfg.get(
+        "train_path", "data/splits/train_features.csv"
+    )
+    val_path = args.val or ds_cfg.get("val_path", "data/splits/val_features.csv")
+    detectors_dir = Path(
+        args.detectors_dir or out_cfg.get("detectors_dir", "models/detect")
+    )
+    metrics_path = Path(
+        args.metrics_out
+        or out_cfg.get("metrics_path", "metrics/val_detect_metrics.json")
+    )
+    val_detections_path = Path(
+        args.predictions_out
+        or out_cfg.get("val_detections_path", "data/predictions/val_detections.csv")
+    )
+    labels_path = Path(
+        out_cfg.get("labels_path", "data/labels/val_anomaly_labels.json")
+    )
+    events_path = Path(
+        out_cfg.get("events_path", "data/events/val_operational_events.json")
+    )
+
+    if not Path(train_path).is_file():
+        print(f"ERROR: Train split not found at {train_path}", file=sys.stderr)
+        return 1
+    if not Path(val_path).is_file():
+        print(f"ERROR: Validation split not found at {val_path}", file=sys.stderr)
+        return 1
+
+    # Strict A7.3 isolation check: ensure test split is never evaluated during Phase 7
+    if "test" in str(val_path).lower():
+        print(
+            "ERROR: A7.3 Violation — Test split evaluation is strictly forbidden during Phase 7.",
+            file=sys.stderr,
+        )
+        return 1
+
+    target_col = ds_cfg.get("target_col", "EffectiveCost")
+    time_col = ds_cfg.get("time_col", "ChargePeriodStart")
+    service_col = ds_cfg.get("service_col", "ServiceName")
+    primary_metric = eval_cfg.get("primary_metric", "event_f1")
+
+    print(f"Loading train features: {train_path}")
+    df_train = pd.read_csv(train_path, low_memory=False)
+    print(f"Loading val features:   {val_path}")
+    df_val = pd.read_csv(val_path, low_memory=False)
+
+    # Compute residuals using champion forecast model or fallback
+    forecast_model_path = ds_cfg.get("forecast_model_path")
+    if forecast_model_path and Path(forecast_model_path).is_file():
+        print(f"Loading champion forecaster from: {forecast_model_path}")
+        forecaster = XGBoostForecaster.load(forecast_model_path)
+        train_preds = forecaster.predict(df_train)
+        val_preds = forecaster.predict(df_val)
+    else:
+        print("Using historical mean forecast for residual baseline...")
+        train_preds = np.zeros(len(df_train))
+        val_preds = np.zeros(len(df_val))
+
+    df_train["residual"] = df_train[target_col] - train_preds
+    df_val["residual"] = df_val[target_col] - val_preds
+
+    # Synthetic Ground-Truth Track Generation (Contract 5 & 6)
+    print(
+        "Generating calibrated synthetic ground-truth anomalies on validation track..."
+    )
+    injector = SyntheticInjector(
+        seed=synth_cfg.get("seed", 42),
+        injection_rate=synth_cfg.get("injection_rate", 0.03),
+        min_duration_hours=synth_cfg.get("min_duration_hours", 2),
+        max_duration_hours=synth_cfg.get("max_duration_hours", 6),
+        multiplier_range=tuple(synth_cfg.get("multiplier_range", [1.5, 3.5])),
+        sigma_range=tuple(synth_cfg.get("sigma_range", [2.5, 5.0])),
+    )
+    df_val_synth, labels, events = injector.inject(
+        df_val,
+        cost_col=target_col,
+        service_col=service_col,
+        time_col=time_col,
+    )
+    df_val_synth["residual"] = df_val_synth[target_col] - val_preds
+
+    labels_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(labels_path, "w", encoding="utf-8") as f:
+        json.dump(labels, f, indent=2)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(events_path, "w", encoding="utf-8") as f:
+        json.dump(events, f, indent=2)
+
+    detectors: list[BaseAnomalyDetector] = []
+    if det_cfg.get("zscore", {}).get("enabled", True):
+        z_cfg = det_cfg.get("zscore", {})
+        detectors.append(
+            ZScoreDetector(
+                threshold=z_cfg.get("threshold", 3.0),
+                per_service=z_cfg.get("per_service", True),
+                one_sided=z_cfg.get("one_sided", True),
+                config=z_cfg,
+            )
+        )
+    if det_cfg.get("rolling_threshold", {}).get("enabled", True):
+        rt_cfg = det_cfg.get("rolling_threshold", {})
+        detectors.append(
+            RollingThresholdDetector(
+                window=rt_cfg.get("window", 24),
+                threshold=rt_cfg.get("threshold", 3.0),
+                config=rt_cfg,
+            )
+        )
+    if det_cfg.get("iforest", {}).get("enabled", True):
+        if_cfg = det_cfg.get("iforest", {})
+        detectors.append(
+            IsolationForestDetector(
+                n_estimators=if_cfg.get("n_estimators", 100),
+                contamination=if_cfg.get("contamination", 0.03),
+                threshold=if_cfg.get("threshold", 0.55),
+                seed=if_cfg.get("seed", 42),
+                config=if_cfg,
+            )
+        )
+    if det_cfg.get("ocsvm", {}).get("enabled", True):
+        oc_cfg = det_cfg.get("ocsvm", {})
+        detectors.append(
+            OneClassSVMDetector(
+                kernel=oc_cfg.get("kernel", "rbf"),
+                nu=oc_cfg.get("nu", 0.03),
+                threshold=oc_cfg.get("threshold", 0.0),
+                config=oc_cfg,
+            )
+        )
+
+    detectors_dir.mkdir(parents=True, exist_ok=True)
+    results_synthetic = {}
+    results_real = {}
+
+    detections_dict = {
+        time_col: df_val[time_col],
+        service_col: df_val[service_col],
+        "is_synthetic_anomaly": df_val_synth["is_anomaly"],
+        "cost_actual_clean": df_val[target_col],
+        "cost_actual_synth": df_val_synth[target_col],
+        "residual_clean": df_val["residual"],
+        "residual_synth": df_val_synth["residual"],
+    }
+
+    print("\n=== Fitting Detectors on D_train Residuals ===")
+    for i, det in enumerate(detectors, 1):
+        print(f"[{i}/{len(detectors)}] Fitting {det.name}...")
+        det.fit(
+            df_train,
+            residual_col="residual",
+            service_col=service_col,
+            time_col=time_col,
+        )
+
+        # Real Data Track
+        clean_scores = det.score(df_val)
+        clean_preds = det.predict(df_val)
+        detections_dict[f"score_clean_{det.name}"] = clean_scores
+        detections_dict[f"alert_clean_{det.name}"] = clean_preds
+
+        y_zero = np.zeros(len(df_val), dtype=int)
+        df_val_eval = df_val.copy()
+        df_val_eval["y_zero"] = y_zero
+        df_val_eval["pred"] = clean_preds
+        fp_strat = stratified_fp_analysis(
+            df_val_eval, y_true_col="y_zero", y_pred_col="pred"
+        )
+        results_real[det.name] = {
+            "total_points": len(df_val),
+            "false_positives": int(np.sum(clean_preds == 1)),
+            "fpr": float(np.mean(clean_preds == 1)),
+            "stratified_fpr": fp_strat,
+            "metadata": det.get_metadata(),
+        }
+
+        # Synthetic Track
+        synth_scores = det.score(df_val_synth)
+        synth_preds = det.predict(df_val_synth)
+        detections_dict[f"score_synth_{det.name}"] = synth_scores
+        detections_dict[f"alert_synth_{det.name}"] = synth_preds
+
+        p_metrics = point_level_metrics(
+            y_true=df_val_synth["is_anomaly"].to_numpy(dtype=int),
+            y_pred=synth_preds,
+        )
+        ev_metrics = event_level_metrics(
+            timestamps=df_val_synth[time_col],
+            y_true=df_val_synth["is_anomaly"].to_numpy(dtype=int),
+            y_pred=synth_preds,
+        )
+        results_synthetic[det.name] = {
+            "point_metrics": p_metrics,
+            "event_metrics": ev_metrics,
+            "metadata": det.get_metadata(),
+        }
+
+        chk = det.save(detectors_dir)
+        print(f"    Checkpointed: {chk.name}")
+
+    print("\n" + "=" * 90)
+    print("TRACK 1: REAL DATA TRACK (False Positive Rate & Diurnal Stratification)")
+    print("=" * 90)
+    h_real = f"{'Detector':<22} | {'Alerts':<8} | {'Overall FPR (%)':<15} | {'Weekday FPR (%)':<15} | {'Weekend FPR (%)':<15}"
+    print(h_real)
+    print("-" * len(h_real))
+    for name, res in results_real.items():
+        st = res.get("stratified_fpr", {})
+        wk_fpr = st.get("weekday_fpr", 0.0) * 100.0
+        we_fpr = st.get("weekend_fpr", 0.0) * 100.0
+        print(
+            f"{name:<22} | {res['false_positives']:<8} | {res['fpr'] * 100:<15.2f} | {wk_fpr:<15.2f} | {we_fpr:<15.2f}"
+        )
+
+    print("\n" + "=" * 90)
+    print("TRACK 2: SYNTHETIC GROUND-TRUTH TRACK (Calibrated Incident Evaluation)")
+    print("=" * 90)
+    h_synth = f"{'Detector':<22} | {'Point F1':<10} | {'Point Prec':<10} | {'Point Rec':<10} | {'Event F1':<10} | {'Event Rec':<10} | {'Mean Delay (h)':<14}"
+    print(h_synth)
+    print("-" * len(h_synth))
+    for name, res in results_synthetic.items():
+        pm = res["point_metrics"]
+        em = res["event_metrics"]
+        print(
+            f"{name:<22} | {pm['f1']:<10.4f} | {pm['precision']:<10.4f} | {pm['recall']:<10.4f} | {em['event_f1']:<10.4f} | {em['event_recall']:<10.4f} | {em['mean_delay_hours']:<14.2f}"
+        )
+
+    champion_name = max(
+        results_synthetic.keys(),
+        key=lambda k: results_synthetic[k]["event_metrics"].get(primary_metric, 0.0),
+    )
+    print("=" * 90)
+    print(
+        f"CHAMPION DETECTOR SELECTED: '{champion_name}' (Highest {primary_metric.upper()} on Validation Ground Truth)"
+    )
+    print("=" * 90)
+
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_payload = {
+        "primary_metric": primary_metric,
+        "champion_detector": champion_name,
+        "validation_rows": len(df_val),
+        "synthetic_incidents": len(labels),
+        "real_track": results_real,
+        "synthetic_track": results_synthetic,
+    }
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)
+    print(f"\nSaved validation detection metrics to: {metrics_path}")
+
+    val_detections_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(detections_dict).to_csv(val_detections_path, index=False)
+    print(f"Saved validation detections matrix to: {val_detections_path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI Entry point."""
     parser = argparse.ArgumentParser(
@@ -598,6 +887,21 @@ def main(argv: list[str] | None = None) -> int:
         "--predictions-out", help="Path to output validation predictions CSV"
     )
     p_fc.set_defaults(func=cmd_forecast)
+
+    # detect
+    p_det = subparsers.add_parser(
+        "detect",
+        help="Train and evaluate statistical and ML anomaly detectors on validation split",
+    )
+    p_det.add_argument("--config", help="Path to detect configuration YAML")
+    p_det.add_argument("--train", help="Path to training features CSV")
+    p_det.add_argument("--val", help="Path to validation features CSV")
+    p_det.add_argument("--detectors-dir", help="Directory to save serialized detectors")
+    p_det.add_argument("--metrics-out", help="Path to output validation metrics JSON")
+    p_det.add_argument(
+        "--predictions-out", help="Path to output validation detections CSV"
+    )
+    p_det.set_defaults(func=cmd_detect)
 
     parsed = parser.parse_args(argv)
     return parsed.func(parsed)
