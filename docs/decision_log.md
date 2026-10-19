@@ -72,8 +72,34 @@ This log records binding architectural decisions, context, rationale, and conseq
 ---
 
 ### DEC-008: Open Contract Items Deferred to Phase 2 Dataset Selection
-- **Status**: **PENDING ARCHITECT / DATASET CONFIRMATION**
+- **Status**: **RESOLVED**
 - **Date**: 2026-10-19
-- **Context**: Certain technical contracts (exact canonical time grain, primary cost metric, specific currency, event schema nuances) depend on the exact empirical characteristics of the dataset selected in Phase 2.
-- **Decision**: Catalog these items as explicit `OPEN ITEM`s in `docs/contracts.md` rather than making unverified assumptions.
-- **Consequences**: Ensures contracts reflect the actual acquired data rather than fictitious constraints.
+- **Context**: Technical contracts (canonical 1h grain, EffectiveCost metric, USD currency, Contract 5/6 operational schemas) were resolved against the FOCUS 1.0 sample dataset.
+
+---
+
+### DEC-009: Champion Forecaster Selection (XGBoost with Log-Transform)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-19
+- **Context**: Baseline (Seasonal Naive, Moving Average, Exponential Smoothing) vs ML models evaluated on validation partition ($D_{\text{val}}$).
+- **Decision**: XGBoost with `log1p` target transformation selected as champion forecaster (Run `run_20261019_172039_9dc09a`). Achieved WAPE of 59.98% (57% reduction over Seasonal Naive) and MASE of 0.3350.
+- **Consequences**: Point residuals $e(t) = y(t) - \hat{y}(t)$ provide a calibrated foundation for Phase 7 anomaly detection.
+
+---
+
+### DEC-010: Champion Anomaly Detector Selection (Rolling Threshold)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-19
+- **Context**: Statistical (Z-Score, Rolling Threshold) vs ML unsupervised (Isolation Forest, One-Class SVM) evaluated on dual-track validation.
+- **Decision**: Rolling Threshold Detector selected as champion (Run `run_20261019_174627_660563`). Achieved 0.10% False Positive Rate on real data track, Event-F1 of 0.9219 (59/67 detected, 0.00h mean delay) on synthetic ground truth.
+- **Consequences**: Provides low-noise, responsive alerts with robust diurnal tracking.
+
+---
+
+### DEC-011: Root-Cause Attribution Champion Selection (Temporal Correlation & XGBoost)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-19
+- **Context**: 4 attributors (Random, Empirical Class Prior, Temporal Correlation Heuristic, XGBoost Multi-Class Ranker) evaluated on 27 validation incidents with concurrent benign decoy deployments.
+- **Decision**: Temporal Correlation Attributor and XGBoost Attributor both achieved 100.0% Top-1, Top-2, and Top-3 accuracy on validation incidents (Run `run_20261019_181013_7bab3d`), effectively rejecting benign background decoy operations. Temporal Correlation selected as primary champion for transparent, zero-hyperparameter interpretability, with XGBoost preserved for multi-modal telemetry jumps.
+- **Consequences**: Feeds directly into Phase 9 (Explainability / SHAP) and Phase 10 (Interactive FinOps Dashboard).
+
