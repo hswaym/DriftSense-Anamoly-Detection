@@ -7,7 +7,7 @@ dataset:
   license: "Apache-2.0"
   specification_version: "FOCUS-1.0"
   url: "https://raw.githubusercontent.com/FinOps-Open-Cost-and-Usage-Spec/FOCUS-Sample-Data/main/FOCUS-1.0/focus_sample_10000.csv"
-  sha256: "3315d4806a37642f4cff86e7977302adf089e486"
+  sha256: "0bf58b73123294c4476b648e647cad842935036f67dc4e9a2cc4a6d7497cc2e3"
   local_path: "data/raw/focus_sample_10000.csv"
   format: "csv"
   expected_rows: 10000

@@ -32,7 +32,7 @@ This report presents an empirical evaluation of candidate datasets for DriftSens
     curl -fsSL -o data/raw/focus_sample_10000.csv \
       https://raw.githubusercontent.com/FinOps-Open-Cost-and-Usage-Spec/FOCUS-Sample-Data/main/FOCUS-1.0/focus_sample_10000.csv
     ```
-15. **Verification Evidence**: Directly verified on 2026-10-19 via GitHub API and raw content inspection (`sha: 3315d4806a37642f4cff86e7977302adf089e486`, 7,529,214 bytes).
+15. **Verification Evidence**: Directly verified on 2026-10-19 via GitHub API and raw content inspection (`sha256: 0bf58b73123294c4476b648e647cad842935036f67dc4e9a2cc4a6d7497cc2e3`, Git blob `sha: 3315d4806a37642f4cff86e7977302adf089e486`, 7,529,214 bytes).
 16. **Decision**: **SELECTED (PRIMARY DATASET)**  
     - **Reason**: 100% compliant with the FinOps FOCUS 1.3 specification; provides verified multi-service hourly cost and consumed usage metrics across real AWS services; permissive Apache-2.0 license.
 

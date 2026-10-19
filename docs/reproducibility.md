@@ -44,7 +44,7 @@ All model training, full-scale dataset downloads, exploratory data analysis, and
    - Cell 1: Clones repository at pinned commit `5e57c0a` and installs `driftsense`.
    - Cell 2: Runs `driftsense hwcheck` and prints CPU/RAM/Disk diagnostics.
    - Cell 3: Creates timestamped run directory: `runs/<run_id>/`.
-   - Cell 4: Idempotently downloads `data/raw/focus_sample_10000.csv` and verifies SHA256 checksum (`3315d4806a37642f4cff86e7977302adf089e486`).
+   - Cell 4: Idempotently downloads `data/raw/focus_sample_10000.csv` and verifies SHA256 checksum (`0bf58b73123294c4476b648e647cad842935036f67dc4e9a2cc4a6d7497cc2e3`).
    - Cell 5: Executes `driftsense validate` and emits `data_quality_report.json`.
    - Cell 6: Writes `manifest.json` and validates that all artifact hashes match.
 5. **Artifact Handoff**:
