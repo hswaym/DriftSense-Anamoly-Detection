@@ -13,6 +13,8 @@ import argparse
 import sys
 
 from driftsense.data.acquire import acquire_dataset
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.data.clean import clean_focus_data
 from driftsense.data.validate import validate_dataset
 from driftsense.runtime.config import load_config
 from driftsense.runtime.hardware import check_hardware
@@ -129,6 +131,97 @@ def cmd_verify_manifest(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_clean(args: argparse.Namespace) -> int:
+    """Execute FOCUS data cleaning and optional aggregation."""
+    import json
+    from pathlib import Path
+
+    import pandas as pd
+
+    cfg: dict = {}
+    if args.config:
+        loaded, _ = load_config(args.config)
+        cfg = loaded
+
+    ds_cfg = cfg.get("dataset", {})
+    clean_cfg = cfg.get("cleaning", {})
+    agg_cfg = cfg.get("aggregation", {})
+
+    input_path = args.input or ds_cfg.get("input_path")
+    if not input_path or not Path(input_path).is_file():
+        print(
+            f"ERROR: Valid input dataset path required (found: {input_path}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = args.output or ds_cfg.get(
+        "cleaned_output_path", "data/processed/focus_cleaned.csv"
+    )
+    log_path = args.log_out or ds_cfg.get("cleaning_log_path", "cleaning_log.json")
+
+    print(f"Loading raw dataset from {input_path}...")
+    df_raw = pd.read_csv(input_path, low_memory=False)
+
+    df_cleaned, cleaning_log = clean_focus_data(df_raw, clean_cfg)
+    print("=== Cleaning Summary ===")
+    print(f"Initial Rows:                   {cleaning_log['initial_rows']}")
+    print(f"Final Rows:                     {cleaning_log['final_rows']}")
+    print(f"Exact Duplicates Dropped:       {cleaning_log['exact_duplicates_dropped']}")
+    print(f"Missing Services Dropped:       {cleaning_log['missing_services_dropped']}")
+    print(
+        f"Missing Timestamps Dropped:     {cleaning_log['missing_timestamps_dropped']}"
+    )
+    print(
+        f"Invalid Timestamps Dropped:     {cleaning_log['invalid_timestamps_dropped']}"
+    )
+    print(
+        f"ConsumedQuantity Imputed:       {cleaning_log['missing_consumed_quantity_imputed']}"
+    )
+    print(
+        f"Negative EffectiveCost Handled: {cleaning_log['negative_effective_cost_handled']}"
+    )
+    print(
+        f"Negative BilledCost Handled:    {cleaning_log['negative_billed_cost_handled']}"
+    )
+    print(
+        f"Unit Normalization Changes:     {cleaning_log['unit_normalization_changes']}"
+    )
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df_cleaned.to_csv(output_path, index=False)
+    print(f"Cleaned dataset saved to: {output_path}")
+
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(cleaning_log, f, indent=2)
+    print(f"Cleaning log saved to: {log_path}")
+
+    if args.aggregate or agg_cfg.get("enabled", False):
+        grain = args.grain or agg_cfg.get("grain", "1h")
+        agg_output = args.agg_output or ds_cfg.get(
+            "aggregated_output_path", f"data/processed/focus_aggregated_{grain}.csv"
+        )
+        df_agg, agg_summary = aggregate_to_canonical_grain(
+            df_cleaned,
+            grain=grain,
+            service_col=agg_cfg.get("service_col", "ServiceName"),
+            time_col=agg_cfg.get("time_col", "ChargePeriodStart"),
+            continuous_grid=agg_cfg.get("continuous_grid", True),
+            grid_scope=agg_cfg.get("grid_scope", "per_service"),
+        )
+        Path(agg_output).parent.mkdir(parents=True, exist_ok=True)
+        df_agg.to_csv(agg_output, index=False)
+        print(f"Canonical aggregation ({grain}) saved to: {agg_output}")
+        print(
+            f"Aggregated Rows: {agg_summary['output_rows']}, "
+            f"Services: {agg_summary['distinct_services']}, "
+            f"Grid Points Added: {agg_summary['grid_points_added']}"
+        )
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI Entry point."""
     parser = argparse.ArgumentParser(
@@ -182,6 +275,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Require dataset files to be present locally for hash verification",
     )
     p_vm.set_defaults(func=cmd_verify_manifest)
+
+    # clean
+    p_cln = subparsers.add_parser(
+        "clean", help="Clean dataset and aggregate to canonical grain"
+    )
+    p_cln.add_argument("--config", help="Path to clean configuration YAML")
+    p_cln.add_argument("--input", help="Path to raw CSV dataset")
+    p_cln.add_argument("--output", help="Path to output cleaned CSV")
+    p_cln.add_argument("--log-out", help="Path to output cleaning_log.json")
+    p_cln.add_argument(
+        "--aggregate", action="store_true", help="Aggregate to canonical grain"
+    )
+    p_cln.add_argument("--grain", default="1h", help="Canonical grain ('1h', '1D')")
+    p_cln.add_argument("--agg-output", help="Path to output aggregated CSV")
+    p_cln.set_defaults(func=cmd_clean)
 
     parsed = parser.parse_args(argv)
     return parsed.func(parsed)

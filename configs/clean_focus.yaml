@@ -1,0 +1,34 @@
+# DriftSense — FOCUS Cleaning and Aggregation Configuration
+
+dataset:
+  input_path: "data/raw/focus_sample_10000.csv"
+  cleaned_output_path: "data/processed/focus_cleaned.csv"
+  aggregated_output_path: "data/processed/focus_aggregated_1h.csv"
+  cleaning_log_path: "cleaning_log.json"
+
+cleaning:
+  deduplicate: true
+  time_columns:
+    - "ChargePeriodStart"
+    - "ChargePeriodEnd"
+  required_columns:
+    - "ChargePeriodStart"
+    - "ServiceName"
+  impute_consumed_quantity: 0.0
+  impute_consumed_unit: "Unknown"
+  normalize_units: true
+  negative_cost_policy: "segregate_credits"
+  sort_output: true
+
+aggregation:
+  enabled: true
+  grain: "1h"
+  service_col: "ServiceName"
+  time_col: "ChargePeriodStart"
+  continuous_grid: true
+  grid_scope: "per_service"
+
+runtime:
+  seed: 42
+  phase: "PHASE_4"
+  stage: "clean_eda"

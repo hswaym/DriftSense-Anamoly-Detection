@@ -1,0 +1,453 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 02: Exploratory Data Analysis (EDA) & Data Cleaning
+#
+# **Runtime Type:** Python 3 (CPU)  
+# **Estimated Runtime:** ~2-3 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Cleaned Dataset: `data/processed/focus_cleaned.csv`  
+# - Canonical Aggregated Dataset (1h): `data/processed/focus_aggregated_1h.csv`  
+# - Cleaning Audit Log: `runs/<run_id>/cleaning_log.json`  
+# - Summary Statistics: `runs/<run_id>/eda_summary_statistics.json`  
+# - EDA Visualizations (8 PNG figures in `runs/<run_id>/`):
+#   1. `eda_01_total_cost_over_time.png` (Aggregate spending trajectory)
+#   2. `eda_02_service_cost_breakdown.png` (Multi-service cost dynamics)
+#   3. `eda_03_cost_distribution.png` (Cost distributions, KDE, log-scale)
+#   4. `eda_04_usage_vs_cost.png` (Usage vs. cost linear and non-linear patterns)
+#   5. `eda_05_seasonality.png` (Diurnal hour-of-day and day-of-week seasonality)
+#   6. `eda_06_zero_cost_frequency.png` (Zero/near-zero cost frequency analysis)
+#   7. `eda_07_correlation_matrix.png` (Cross-feature and cross-service correlation)
+#   8. `eda_08_event_track_readiness.png` (Operational event overlay / synthetic track readiness)
+# - Run Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL LEAKAGE WARNING (G6 Rule):**  
+# > All statistics and plots in this notebook are computed over the full dataset strictly for descriptive and visual exploration.  
+# > **NO statistics computed in this notebook will be reused as scalers, normalizers, or feature transformers in any downstream forecasting or anomaly detection models.**
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+
+# Install driftsense package and dependencies
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Acquisition Check & Data Cleaning Pipeline
+
+# %%
+import json
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.data.acquire import acquire_dataset
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+
+CONFIG_PATH = "configs/clean_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg.get("dataset", {})
+clean_cfg = cfg.get("cleaning", {})
+agg_cfg = cfg.get("aggregation", {})
+
+raw_path = Path(dataset_cfg.get("input_path", "data/raw/focus_sample_10000.csv"))
+if not raw_path.is_file():
+    print(f"Raw data not found at {raw_path}. Downloading...")
+    # Acquire using known URL
+    data_cfg_path = "configs/data_focus.yaml"
+    d_cfg, _ = load_config(data_cfg_path)
+    acquire_dataset(
+        url=d_cfg["dataset"]["url"],
+        destination=str(raw_path),
+        expected_sha256=d_cfg["dataset"]["sha256"],
+        overwrite=False,
+    )
+
+print(f"Loading raw dataset from {raw_path}...")
+df_raw = pd.read_csv(raw_path, low_memory=False)
+print(f"Raw shape: {df_raw.shape}")
+
+# Execute cleaning pipeline
+df_cleaned, cleaning_log = clean_focus_data(df_raw, clean_cfg)
+print("\n=== Data Cleaning Summary ===")
+for k, v in cleaning_log.items():
+    print(f"{k:35}: {v}")
+
+# Save cleaning log to run directory
+cleaning_log_file = RUN_DIR / "cleaning_log.json"
+with open(cleaning_log_file, "w", encoding="utf-8") as f:
+    json.dump(cleaning_log, f, indent=2)
+
+# Save cleaned dataset
+cleaned_out_path = Path(dataset_cfg.get("cleaned_output_path", "data/processed/focus_cleaned.csv"))
+cleaned_out_path.parent.mkdir(parents=True, exist_ok=True)
+df_cleaned.to_csv(cleaned_out_path, index=False)
+print(f"\nCleaned dataset saved to: {cleaned_out_path} ({cleaned_out_path.stat().st_size:,} bytes)")
+
+# Aggregate to canonical grain
+grain = agg_cfg.get("grain", "1h")
+df_agg, agg_summary = aggregate_to_canonical_grain(
+    df_cleaned,
+    grain=grain,
+    service_col=agg_cfg.get("service_col", "ServiceName"),
+    time_col=agg_cfg.get("time_col", "ChargePeriodStart"),
+    continuous_grid=agg_cfg.get("continuous_grid", True),
+    grid_scope=agg_cfg.get("grid_scope", "per_service"),
+)
+
+agg_out_path = Path(dataset_cfg.get("aggregated_output_path", f"data/processed/focus_aggregated_{grain}.csv"))
+agg_out_path.parent.mkdir(parents=True, exist_ok=True)
+df_agg.to_csv(agg_out_path, index=False)
+print(f"Aggregated dataset saved to: {agg_out_path} ({agg_out_path.stat().st_size:,} bytes)")
+
+print("\n=== Aggregation Summary ===")
+for k, v in agg_summary.items():
+    print(f"{k:25}: {v}")
+
+# %% [markdown]
+# ## 5. Exploratory Data Analysis & Visualizations
+
+# %%
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# Set aesthetic styling
+sns.set_theme(style="whitegrid", palette="muted")
+plt.rcParams.update({
+    "font.family": "sans-serif",
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.labelsize": 12,
+    "figure.titlesize": 14,
+    "figure.dpi": 150,
+})
+
+time_col = agg_cfg.get("time_col", "ChargePeriodStart")
+service_col = agg_cfg.get("service_col", "ServiceName")
+
+# Ensure proper datetime
+df_agg[time_col] = pd.to_datetime(df_agg[time_col], utc=True)
+
+# -------------------------------------------------------------
+# PLOT 1: Total Cost Over Time
+# -------------------------------------------------------------
+plt.figure(figsize=(14, 5))
+df_total = df_agg.groupby(time_col)["EffectiveCost"].sum().reset_index()
+plt.plot(df_total[time_col], df_total["EffectiveCost"], color="#2b5c8f", lw=1.8, label="Total Hourly EffectiveCost")
+plt.title("Total Cloud Infrastructure Cost Over Time (Canonical Hourly Grain)")
+plt.xlabel("Charge Interval (UTC)")
+plt.ylabel("Effective Cost ($ USD)")
+plt.grid(True, linestyle="--", alpha=0.6)
+plt.legend(loc="upper right")
+plt.tight_layout()
+p1_path = RUN_DIR / "eda_01_total_cost_over_time.png"
+plt.savefig(p1_path)
+plt.close()
+print(f"Saved: {p1_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 2: Per-Service Cost Breakdown (Top 6 Services)
+# -------------------------------------------------------------
+top_services = df_agg.groupby(service_col)["EffectiveCost"].sum().nlargest(6).index.tolist()
+plt.figure(figsize=(14, 6))
+palette = sns.color_palette("tab10", len(top_services))
+
+for i, svc in enumerate(top_services):
+    svc_data = df_agg[df_agg[service_col] == svc]
+    plt.plot(svc_data[time_col], svc_data["EffectiveCost"], label=svc, lw=1.5, color=palette[i], alpha=0.85)
+
+plt.title("Hourly Spending Dynamics by Top Cloud Services")
+plt.xlabel("Charge Interval (UTC)")
+plt.ylabel("Effective Cost ($ USD)")
+plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Service")
+plt.tight_layout()
+p2_path = RUN_DIR / "eda_02_service_cost_breakdown.png"
+plt.savefig(p2_path)
+plt.close()
+print(f"Saved: {p2_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 3: Cost Distribution (KDE and Log-Scale)
+# -------------------------------------------------------------
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+# Raw cost histogram
+costs = df_agg["EffectiveCost"]
+ax1.hist(costs[costs > 0], bins=50, color="#3470a3", edgecolor="white", alpha=0.8)
+ax1.set_title("Cost Distribution (Non-Zero Values)")
+ax1.set_xlabel("Effective Cost ($ USD)")
+ax1.set_ylabel("Frequency")
+
+# Log10-scale histogram
+log_costs = np.log10(costs[costs > 0] + 1e-6)
+ax2.hist(log_costs, bins=50, color="#d95f02", edgecolor="white", alpha=0.8)
+ax2.set_title("Log10 Cost Distribution (Power-Law / Heavy-Tail Check)")
+ax2.set_xlabel("log10(Effective Cost)")
+ax2.set_ylabel("Frequency")
+
+plt.tight_layout()
+p3_path = RUN_DIR / "eda_03_cost_distribution.png"
+plt.savefig(p3_path)
+plt.close()
+print(f"Saved: {p3_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 4: Usage vs Cost Relationship
+# -------------------------------------------------------------
+plt.figure(figsize=(12, 6))
+top_3_services = df_agg.groupby(service_col)["EffectiveCost"].sum().nlargest(3).index.tolist()
+df_top3 = df_agg[df_agg[service_col].isin(top_3_services) & (df_agg["ConsumedQuantity"] > 0)]
+
+sns.scatterplot(
+    data=df_top3,
+    x="ConsumedQuantity",
+    y="EffectiveCost",
+    hue=service_col,
+    alpha=0.6,
+    s=40,
+)
+plt.title("Resource Consumption vs. Incurred Cost (Top Services)")
+plt.xlabel("Consumed Quantity (Normalized Units)")
+plt.ylabel("Effective Cost ($ USD)")
+plt.tight_layout()
+p4_path = RUN_DIR / "eda_04_usage_vs_cost.png"
+plt.savefig(p4_path)
+plt.close()
+print(f"Saved: {p4_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 5: Seasonality (Diurnal Hour-of-Day and Day-of-Week)
+# -------------------------------------------------------------
+df_agg["hour"] = df_agg[time_col].dt.hour
+df_agg["day_of_week"] = df_agg[time_col].dt.day_name()
+days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+hourly_profile = df_agg.groupby("hour")["EffectiveCost"].mean()
+ax1.plot(hourly_profile.index, hourly_profile.values, marker="o", color="#1b9e77", lw=2)
+ax1.set_title("Diurnal Pattern (Mean Hourly Cost by Hour of Day UTC)")
+ax1.set_xlabel("Hour of Day (0-23 UTC)")
+ax1.set_ylabel("Mean Effective Cost ($)")
+ax1.set_xticks(range(0, 24, 2))
+
+dow_profile = df_agg.groupby("day_of_week")["EffectiveCost"].mean().reindex(days_order)
+ax2.bar(dow_profile.index, dow_profile.values, color="#7570b3", alpha=0.85)
+ax2.set_title("Day-of-Week Seasonality (Mean Effective Cost)")
+ax2.set_xlabel("Day of Week")
+ax2.set_ylabel("Mean Effective Cost ($)")
+ax2.tick_params(axis="x", rotation=30)
+
+plt.tight_layout()
+p5_path = RUN_DIR / "eda_05_seasonality.png"
+plt.savefig(p5_path)
+plt.close()
+print(f"Saved: {p5_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 6: Zero and Near-Zero Cost Frequency (MAPE Context)
+# -------------------------------------------------------------
+zero_counts = df_agg.groupby(service_col)["EffectiveCost"].apply(lambda s: (s <= 1e-4).mean() * 100.0)
+top_zero_svcs = zero_counts.nlargest(10)
+
+plt.figure(figsize=(12, 5))
+plt.barh(top_zero_svcs.index[::-1], top_zero_svcs.values[::-1], color="#e7298a", alpha=0.8)
+plt.title("Percentage of Zero / Near-Zero Cost Intervals (Top 10 Intermittent Services)")
+plt.xlabel("Percentage of Intervals with Cost ≈ $0 (%)")
+plt.ylabel("Service")
+plt.xlim(0, 100)
+plt.tight_layout()
+p6_path = RUN_DIR / "eda_06_zero_cost_frequency.png"
+plt.savefig(p6_path)
+plt.close()
+print(f"Saved: {p6_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 7: Cross-Metric & Service Correlation Matrix
+# -------------------------------------------------------------
+# Pivot top services into time series columns
+pivot_df = df_agg.pivot_table(index=time_col, columns=service_col, values="EffectiveCost", fill_value=0.0)
+top_pivot_cols = pivot_df[top_services[:6]]
+
+plt.figure(figsize=(8, 7))
+corr = top_pivot_cols.corr()
+mask = np.triu(np.ones_like(corr, dtype=bool))
+sns.heatmap(corr, mask=mask, annot=True, fmt=".2f", cmap="coolwarm", vmin=-1, vmax=1, cbar_kws={"shrink": 0.8})
+plt.title("Cross-Service Cost Correlation Matrix (Top 6 Services)")
+plt.tight_layout()
+p7_path = RUN_DIR / "eda_07_correlation_matrix.png"
+plt.savefig(p7_path)
+plt.close()
+print(f"Saved: {p7_path.name}")
+
+# -------------------------------------------------------------
+# PLOT 8: Event Overlay / Synthetic Track Readiness
+# -------------------------------------------------------------
+plt.figure(figsize=(14, 5))
+plt.plot(df_total[time_col], df_total["EffectiveCost"], color="#2b5c8f", lw=1.5, label="Observed Total Cost")
+# Overlay synthetic scenario injection boundary marker
+med_time = df_total[time_col].quantile(0.65)
+plt.axvline(med_time, color="#d95f02", linestyle="--", lw=2, label="Synthetic Fault Injection Horizon (Placeholder)")
+plt.fill_between(
+    df_total[time_col],
+    df_total["EffectiveCost"],
+    where=(df_total[time_col] >= med_time),
+    color="#d95f02",
+    alpha=0.1,
+    label="Evaluation Window (Synthetic Confounders & Decoys)",
+)
+plt.title("Operational Event Tracking & Anomaly Calibration Timeline")
+plt.xlabel("Charge Interval (UTC)")
+plt.ylabel("Effective Cost ($ USD)")
+plt.legend(loc="upper right")
+plt.tight_layout()
+p8_path = RUN_DIR / "eda_08_event_track_readiness.png"
+plt.savefig(p8_path)
+plt.close()
+print(f"Saved: {p8_path.name}")
+
+# %% [markdown]
+# ## 6. Summary Statistics & Quantitative Evaluation
+
+# %%
+from scipy import stats
+
+summary_stats = {
+    "total_records_raw": len(df_raw),
+    "total_records_cleaned": len(df_cleaned),
+    "total_canonical_intervals": len(df_agg),
+    "distinct_services": int(df_agg[service_col].nunique()),
+    "min_timestamp_utc": str(df_agg[time_col].min()),
+    "max_timestamp_utc": str(df_agg[time_col].max()),
+    "total_effective_spend_usd": float(df_agg["EffectiveCost"].sum()),
+    "total_billed_spend_usd": float(df_agg["BilledCost"].sum()),
+    "total_effective_credits_usd": float(df_agg.get("EffectiveCreditAmount", pd.Series([0])).sum()),
+    "overall_zero_interval_pct": float((df_agg["EffectiveCost"] <= 1e-4).mean() * 100.0),
+    "per_service": {},
+}
+
+for svc in df_agg[service_col].unique():
+    svc_costs = df_agg[df_agg[service_col] == svc]["EffectiveCost"]
+    summary_stats["per_service"][svc] = {
+        "intervals": len(svc_costs),
+        "mean_hourly_cost": float(svc_costs.mean()),
+        "std_hourly_cost": float(svc_costs.std()),
+        "median_hourly_cost": float(svc_costs.median()),
+        "max_hourly_cost": float(svc_costs.max()),
+        "total_spend": float(svc_costs.sum()),
+        "zero_pct": float((svc_costs <= 1e-4).mean() * 100.0),
+        "skewness": float(stats.skew(svc_costs)) if len(svc_costs) > 2 else 0.0,
+    }
+
+summary_file = RUN_DIR / "eda_summary_statistics.json"
+with open(summary_file, "w", encoding="utf-8") as f:
+    json.dump(summary_stats, f, indent=2)
+
+print("=== Overall Summary Statistics ===")
+print(f"Total Canonical Intervals:     {summary_stats['total_canonical_intervals']}")
+print(f"Distinct Cloud Services:       {summary_stats['distinct_services']}")
+print(f"Total Effective Spend:         ${summary_stats['total_effective_spend_usd']:,.2f}")
+print(f"Total Segregated Credits:      ${summary_stats['total_effective_credits_usd']:,.2f}")
+print(f"Overall Zero Cost Frequency:   {summary_stats['overall_zero_interval_pct']:.2f}%")
+print(f"\nSummary metrics written to: {summary_file}")
+
+# %% [markdown]
+# ## 7. Manifest Compilation and Integrity Verification
+
+# %%
+from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
+from driftsense.runtime.seed import set_seed
+
+set_seed(cfg.get("runtime", {}).get("seed", 42))
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_4",
+    stage="clean_eda",
+    config_path=CONFIG_PATH,
+    seed=cfg.get("runtime", {}).get("seed", 42),
+)
+
+# Register dataset sources
+builder.add_dataset(str(raw_path))
+
+# Register generated artifacts
+for png_path in RUN_DIR.glob("*.png"):
+    builder.add_artifact(str(png_path))
+
+builder.add_artifact(str(cleaning_log_file))
+builder.add_artifact(str(summary_file))
+builder.add_artifact(str(cleaned_out_path))
+builder.add_artifact(str(agg_out_path))
+
+manifest_path = builder.build(output_dir=str(RUN_DIR))
+print(f"\nManifest successfully generated at: {manifest_path}")
+
+# Verify manifest locally in Colab
+is_valid, errors = verify_manifest(str(RUN_DIR), require_datasets=True)
+if is_valid:
+    print("PASS: Run manifest verification succeeded (All SHA256 checksums verified).")
+else:
+    print(f"FAIL: Manifest verification failed: {errors}")
+    sys.exit(1)
