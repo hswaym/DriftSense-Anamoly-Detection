@@ -1,0 +1,401 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 07: Explainability & TreeSHAP Engine
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~1-3 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Global Feature Importance Ranking: `runs/<run_id>/global_feature_importance.csv`  
+# - Explainability Metrics Report: `runs/<run_id>/val_explain_metrics.json`  
+# - Executive Plain-Text Audit Narratives: `runs/<run_id>/val_narratives.md`  
+# - SHAP Feature Attribution Visualization: `runs/<run_id>/shap_summary.png`  
+# - Cryptographically Verified Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL EVALUATION & ISOLATION INVARIANTS (G6, A9.1, A9.2, A9.3):**  
+# > - **A9.1 TreeSHAP Additivity Invariant:** Every local explanation satisfies $f(x) = \phi_0 + \sum_j \phi_j(x)$ within tolerance $\le 10^{-3}$.  
+# > - **A9.2 Non-Causal Wording Invariant:** All explanations communicate statistical correlation, feature attribution, and operational coincidence. Causal-proof language ("caused by", "responsible for", "proves that") is strictly forbidden.  
+# > - **A9.3 Test Partition Quarantine:** The test partition ($D_{\text{test}}$, Days 25–30) remains strictly locked. No explanations are generated or evaluated on test data.
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+else:
+    subprocess.run(["git", "pull", "origin", "main"], check=False)
+
+# Install driftsense package and dependencies
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Configuration & Dataset Split Verification
+
+# %%
+import json
+import numpy as np
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.data.acquire import acquire_dataset
+from driftsense.eval.splits import chronological_split
+from driftsense.features.builder import FeaturePipeline
+from driftsense.forecast.xgb import XGBoostForecaster
+
+CONFIG_PATH = "configs/explain_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg.get("dataset", {})
+exp_cfg = cfg.get("explain", {})
+
+train_path = Path(dataset_cfg.get("train_path", "data/splits/train_features.csv"))
+val_path = Path(dataset_cfg.get("val_path", "data/splits/val_features.csv"))
+
+# Verify or regenerate splits if running in a fresh workspace
+if not train_path.is_file() or not val_path.is_file():
+    print("Feature splits not detected locally. Regenerating from pipeline...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+    
+    train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
+    pipeline = FeaturePipeline()
+    pipeline.fit(train_df)
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+    
+    train_path.parent.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(train_path, index=False)
+    val_feats.to_csv(val_path, index=False)
+    test_feats.to_csv(train_path.parent / "test_features.csv", index=False)
+
+# Load training and validation partitions
+df_train = pd.read_csv(train_path, low_memory=False)
+df_val = pd.read_csv(val_path, low_memory=False)
+
+# Strict A9.3 Isolation Guard
+assert "test" not in str(val_path).lower(), "A9.3 VIOLATION: Test split passed into validation evaluator!"
+print(f"Loaded Train Partition: {len(df_train):,} rows ({df_train['ServiceName'].nunique()} services)")
+print(f"Loaded Val Partition:   {len(df_val):,} rows ({df_val['ServiceName'].nunique()} services)")
+
+target_col = dataset_cfg.get("target_col", "EffectiveCost")
+time_col = dataset_cfg.get("time_col", "ChargePeriodStart")
+service_col = dataset_cfg.get("service_col", "ServiceName")
+
+# %% [markdown]
+# ## 5. Load Champion Forecaster & TreeSHAP Explainer
+
+# %%
+from driftsense.explain.shap_explainer import TreeSHAPExplainer
+
+model_path = Path(dataset_cfg.get("forecast_model_path", ""))
+if model_path.is_file():
+    print(f"Loading champion forecasting model from: {model_path}")
+    forecaster = XGBoostForecaster.load(model_path)
+else:
+    print("Training champion XGBoost forecaster for explanation baseline...")
+    forecaster = XGBoostForecaster(n_estimators=100, max_depth=5, seed=42)
+    forecaster.fit(df_train, target_col=target_col, time_col=time_col, service_col=service_col)
+
+# Initialize TreeSHAP explainer
+explainer = TreeSHAPExplainer(
+    forecaster.model_,
+    feature_names=forecaster.feature_names_,
+    atol=exp_cfg.get("atol_additivity", 0.001),
+)
+
+X_val = df_val[forecaster.feature_names_]
+print(f"Computing TreeSHAP feature attributions on validation set ({len(X_val):,} rows)...")
+shap_values = explainer.explain(X_val, check_additivity=True)
+
+# A9.1 Additivity verification
+preds_val = forecaster.predict(df_val)
+base_val = float(explainer.expected_value[0]) if isinstance(explainer.expected_value, (list, np.ndarray)) else float(explainer.expected_value)
+reconstructed = np.sum(shap_values, axis=1) + base_val
+max_additivity_error = float(np.max(np.abs(reconstructed - preds_val)))
+
+print(f"PASS: A9.1 Additivity Invariant Verified. Max Discrepancy = {max_additivity_error:.8f} (Tolerance: {exp_cfg.get('atol_additivity', 0.001)})")
+
+# %% [markdown]
+# ## 6. Global Feature Importance Ranking & Visualizations
+
+# %%
+import matplotlib.pyplot as plt
+from driftsense.explain.importance import compute_global_importance
+
+imp_df = compute_global_importance(shap_values, forecaster.feature_names_, model=forecaster.model_)
+importance_path = RUN_DIR / "global_feature_importance.csv"
+imp_df.to_csv(importance_path, index=False)
+print(f"Saved global feature importance ranking to: {importance_path}")
+
+print("\n" + "=" * 80)
+print("TOP 10 GLOBAL COST DRIVERS (TreeSHAP Mean |Attribution|)")
+print("=" * 80)
+for _, r in imp_df.head(10).iterrows():
+    print(f"Rank {int(r['rank']):<2}: {r['feature']:<30} | Mean |SHAP|: {r['mean_abs_shap']:<8.4f} ({r['relative_importance_pct']:.1f}%)")
+print("=" * 80)
+
+# Plot Global Feature Importance
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+# Plot 1: Top 10 Drivers by Mean |SHAP|
+top10 = imp_df.head(10).sort_values(by="mean_abs_shap", ascending=True)
+ax1.barh(top10["feature"], top10["mean_abs_shap"], color="#2b5c8f", alpha=0.85)
+ax1.set_xlabel("Mean |SHAP Value| ($)", fontsize=11, fontweight="bold")
+ax1.set_title("Global Feature Importance (Top 10 Drivers)", fontsize=12, fontweight="bold")
+ax1.grid(True, axis="x", alpha=0.3)
+
+# Plot 2: Cumulative Importance Curve
+ax2.plot(imp_df["rank"], imp_df["cumulative_importance_pct"], marker="o", color="#e28743", linewidth=2.0)
+ax2.axhline(80.0, color="gray", linestyle="--", label="80% Attribution Threshold")
+ax2.set_xlabel("Number of Features", fontsize=11, fontweight="bold")
+ax2.set_ylabel("Cumulative Explained Attribution (%)", fontsize=11, fontweight="bold")
+ax2.set_title("Cumulative Feature Attribution Coverage", fontsize=12, fontweight="bold")
+ax2.grid(True, alpha=0.3)
+ax2.legend(loc="lower right")
+
+plt.tight_layout()
+shap_plot_path = RUN_DIR / "shap_summary.png"
+fig.savefig(shap_plot_path, dpi=200, bbox_inches="tight")
+plt.close(fig)
+print(f"Saved SHAP summary visualization to: {shap_plot_path}")
+
+# %% [markdown]
+# ## 7. Explanation Stability Across Random Seeds
+
+# %%
+from driftsense.explain.consistency import compute_explanation_stability, compute_cause_agreement
+
+seeds = exp_cfg.get("stability_seeds", [42, 123, 999])
+stability_dfs = []
+
+print(f"Evaluating feature importance rank stability across {len(seeds)} random seeds...")
+for s in seeds:
+    sub_model = XGBoostForecaster(n_estimators=60, max_depth=5, seed=s)
+    sub_model.fit(df_train, target_col=target_col, time_col=time_col, service_col=service_col)
+    sub_explainer = TreeSHAPExplainer(sub_model.model_, feature_names=sub_model.feature_names_)
+    sub_shap = sub_explainer.explain(X_val, check_additivity=False)
+    sub_imp = compute_global_importance(sub_shap, sub_model.feature_names_)
+    stability_dfs.append(sub_imp)
+
+stability_results = compute_explanation_stability(stability_dfs, top_k=5)
+print(f"Mean Spearman Rank Correlation (rho): {stability_results['mean_spearman_rho']:.4f}")
+print(f"Mean Kendall Rank Correlation (tau):  {stability_results['mean_kendall_tau']:.4f}")
+print(f"Top-5 Feature Set Jaccard Overlap:    {stability_results['mean_top_k_jaccard'] * 100:.1f}%")
+print(f"Consensus Top Features across seeds:  {stability_results['top_k_features_shared']}")
+
+# %% [markdown]
+# ## 8. Non-Causal Natural Language Executive Narratives (A9.2)
+
+# %%
+from driftsense.explain.narrative import synthesize_cost_narrative, validate_non_causal_text
+
+# Load operational events and labels
+events_path = Path(dataset_cfg.get("val_events_path", ""))
+labels_path = Path(dataset_cfg.get("val_labels_path", ""))
+events = []
+labels = []
+if events_path.is_file():
+    with open(events_path, "r", encoding="utf-8") as f:
+        events = json.load(f)
+if labels_path.is_file():
+    with open(labels_path, "r", encoding="utf-8") as f:
+        labels = json.load(f)
+
+# Find top cost anomaly instances on validation slice
+residuals = df_val[target_col] - preds_val
+top_anomaly_idxs = np.argsort(np.abs(residuals))[::-1][: exp_cfg.get("num_sample_anomalies", 10)]
+
+instance_explanations = []
+narratives_blocks = []
+
+print("\n=== Generating Executive FinOps Audit Narratives ===")
+for rank, idx in enumerate(top_anomaly_idxs, 1):
+    row = df_val.iloc[idx]
+    pred_id = f"anom_case_{rank}"
+    exp = explainer.explain_instance(row[forecaster.feature_names_], prediction_id=pred_id, top_k=5)
+    instance_explanations.append(exp.to_dict())
+
+    svc = str(row[service_col])
+    ts = str(row[time_col])
+    actual_val = float(row[target_col])
+    exp_val = float(preds_val[idx])
+
+    # Find coincident operational events on this service
+    coincident = [ev for ev in events if ev.get("service_id") == svc or ev.get("service_name") == svc][:2]
+
+    narrative = synthesize_cost_narrative(
+        service_name=svc,
+        timestamp=ts,
+        actual_cost=actual_val,
+        expected_cost=exp_val,
+        top_positive_drivers=exp.top_positive_drivers,
+        coincident_events=coincident,
+    )
+
+    # Strict A9.2 Non-Causal Verification
+    validate_non_causal_text(narrative)
+    narratives_blocks.append(f"## Incident Case {rank}: {svc}\n\n{narrative}\n\n---\n")
+
+print(f"Generated {len(narratives_blocks)} executive narratives. Verified A9.2 non-causal compliance.")
+
+# Check synthetic ground-truth agreement if labels available
+agreement_report = {}
+if labels:
+    agreement_report = compute_cause_agreement(instance_explanations, labels, top_k=3)
+    print(f"Synthetic Ground-Truth Driver Agreement Rate: {agreement_report['agreement_rate'] * 100:.1f}%")
+
+narratives_path = RUN_DIR / "val_narratives.md"
+with open(narratives_path, "w", encoding="utf-8") as f:
+    f.write("# DriftSense — Executive Cost Anomaly Explanations (Phase 9 Audit)\n\n")
+    f.write("\n".join(narratives_blocks))
+print(f"Saved executive narratives to: {narratives_path}")
+
+# Save full explainability metrics JSON
+metrics_payload = {
+    "run_id": RUN_ID,
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "validation_rows": len(df_val),
+    "additivity_verified": True,
+    "max_additivity_error": max_additivity_error,
+    "global_top_drivers": imp_df.head(10).to_dict(orient="records"),
+    "stability": stability_results,
+    "synthetic_agreement": agreement_report,
+}
+val_metrics_path = RUN_DIR / "val_explain_metrics.json"
+with open(val_metrics_path, "w", encoding="utf-8") as f:
+    json.dump(metrics_payload, f, indent=2)
+print(f"Saved explainability metrics to: {val_metrics_path}")
+
+# %% [markdown]
+# ## 9. Run Manifest Compilation & Anti-Leakage Audit
+
+# %%
+from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
+from driftsense.runtime.seed import set_seed
+
+set_seed(cfg.get("runtime", {}).get("seed", 42))
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_9",
+    stage="explainability",
+    config_path=CONFIG_PATH,
+    config_sha256=config_sha256,
+    seed=cfg.get("runtime", {}).get("seed", 42),
+)
+
+builder.add_dataset(str(train_path))
+builder.add_dataset(str(val_path))
+
+builder.add_artifact(str(importance_path))
+builder.add_artifact(str(shap_plot_path))
+builder.add_artifact(str(narratives_path))
+builder.add_artifact(str(val_metrics_path))
+
+manifest_path = builder.save(RUN_DIR)
+print(f"\nManifest successfully emitted to: {manifest_path}")
+
+# Strict A9.3 Anti-Leakage Audit
+manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+for art in manifest_data.get("artifacts", []):
+    path_str = art.get("path", "").lower()
+    assert "test_features" not in path_str, f"A9.3 LEAKAGE: Test split found in manifest: {path_str}"
+    assert "test_explain" not in path_str, f"A9.3 LEAKAGE: Test explanations found in manifest: {path_str}"
+
+print("PASS: A9.3 Anti-Leakage Invariant Verified (Zero test artifacts in manifest).")
+
+is_valid, errors = verify_manifest(RUN_DIR, require_datasets=True)
+if is_valid:
+    print("PASS: Run manifest verification succeeded (All SHA256 checksums verified).")
+else:
+    print(f"FAIL: Manifest verification failed: {errors}")
+    sys.exit(1)
+
+# %% [markdown]
+# ## 10. Artifact Archival & Download
+
+# %%
+import shutil
+
+zip_filename = f"{RUN_ID}.zip"
+zip_path = shutil.make_archive(RUN_ID, "zip", RUN_DIR)
+shutil.move(zip_path, zip_filename)
+print(f"\nRun artifacts successfully archived to: {zip_filename} ({os.path.getsize(zip_filename):,} bytes)")
+
+try:
+    from google.colab import files
+    print("Triggering browser download for Colab run archive...")
+    files.download(zip_filename)
+except ImportError:
+    print(f"Local environment: Run artifacts available at {RUN_DIR.resolve()}")

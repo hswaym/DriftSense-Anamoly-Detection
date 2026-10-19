@@ -1,0 +1,31 @@
+# DriftSense — Explainability & SHAP Engine Configuration
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Note: Test split (data/splits/test_features.csv) is strictly locked and quarantined during Phase 9
+  forecast_model_path: "runs/run_20261019_172039_9dc09a/models/xgboost.joblib"
+  val_labels_path: "runs/run_20261019_181013_7bab3d/val_anomaly_labels.json"
+  val_events_path: "runs/run_20261019_181013_7bab3d/val_operational_events.json"
+  val_detections_path: "runs/run_20261019_174627_660563/val_detections.csv"
+  val_attributions_path: "runs/run_20261019_181013_7bab3d/val_attributions.csv"
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+
+explain:
+  top_k_drivers: 5
+  atol_additivity: 0.001
+  stability_seeds: [42, 123, 999]
+  num_sample_anomalies: 10
+
+output:
+  explanations_dir: "reports/explain"
+  metrics_path: "metrics/val_explain_metrics.json"
+  narratives_path: "reports/explain/val_narratives.md"
+  importance_path: "reports/explain/global_feature_importance.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_9"
+  stage: "explainability"

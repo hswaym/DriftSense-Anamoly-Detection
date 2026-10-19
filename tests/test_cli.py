@@ -113,3 +113,14 @@ def test_cli_attribute_isolation_rejects_test_split(tmp_path: Path):
 
     code = main(["attribute", "--train", str(fake_train), "--val", str(fake_test)])
     assert code == 1
+
+
+def test_cli_explain_isolation_rejects_test_split(tmp_path: Path):
+    """Verify CLI rejects running explainability evaluation on test split (A9.3)."""
+    fake_test = tmp_path / "test_features.csv"
+    fake_test.write_text(
+        "ChargePeriodStart,ServiceName,EffectiveCost\n", encoding="utf-8"
+    )
+
+    code = main(["explain", "--val", str(fake_test)])
+    assert code == 1
