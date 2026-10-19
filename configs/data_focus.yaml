@@ -1,0 +1,27 @@
+# DriftSense — FOCUS Dataset Acquisition & Validation Configuration
+
+dataset:
+  id: "focus_sample_10000"
+  name: "FOCUS Sample Data (10,000 rows)"
+  publisher: "FinOps Foundation"
+  license: "Apache-2.0"
+  specification_version: "FOCUS-1.0"
+  url: "https://raw.githubusercontent.com/FinOps-Open-Cost-and-Usage-Spec/FOCUS-Sample-Data/main/FOCUS-1.0/focus_sample_10000.csv"
+  sha256: "3315d4806a37642f4cff86e7977302adf089e486"
+  local_path: "data/raw/focus_sample_10000.csv"
+  format: "csv"
+  expected_rows: 10000
+  expected_columns: 44
+
+validation:
+  time_column: "ChargePeriodStart"
+  series_column: "ServiceName"
+  cost_columns:
+    - "EffectiveCost"
+    - "BilledCost"
+  output_report_path: "data_quality_report.json"
+
+runtime:
+  seed: 42
+  phase: "PHASE_3"
+  stage: "acquire_validate"

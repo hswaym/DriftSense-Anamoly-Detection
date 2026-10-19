@@ -1,0 +1,155 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 01: Dataset Acquisition and Quality Validation
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~1-2 minutes  
+# **RAM Needed:** ~2 GB  
+# **Disk Needed:** ~500 MB  
+# **Expected Outputs:**  
+# - Raw dataset: `data/raw/focus_sample_10000.csv`  
+# - Quality Report: `data_quality_report.json`  
+# - Run Manifest: `manifest.json`  
+#
+# This notebook is generated deterministically by `scripts/build_notebooks.py`. Hand edits will be overwritten.
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    print("Cloning repository in Google Colab...")
+    subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+    os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+
+# Install driftsense package and dependencies
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Dataset Acquisition & Integrity Check
+
+# %%
+from driftsense.data.acquire import acquire_dataset
+from driftsense.runtime.config import load_config
+
+CONFIG_PATH = "configs/data_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg["dataset"]
+acq_result = acquire_dataset(
+    url=dataset_cfg["url"],
+    destination=dataset_cfg["local_path"],
+    expected_sha256=dataset_cfg["sha256"],
+    overwrite=False,
+)
+
+print("Acquisition Status:")
+for k, v in acq_result.items():
+    print(f"  {k:15}: {v}")
+
+# %% [markdown]
+# ## 5. Dataset Validation & Quality Report Emission
+
+# %%
+from driftsense.data.validate import validate_dataset
+
+QUALITY_REPORT_PATH = RUN_DIR / "data_quality_report.json"
+val_report = validate_dataset(
+    data_path=acq_result["path"],
+    output_report_path=QUALITY_REPORT_PATH,
+)
+
+print(f"Validation Status: {val_report['status']}")
+print(f"Total Rows:        {val_report['total_rows']}")
+print(f"Total Columns:     {val_report['total_columns']}")
+if val_report["issues"]:
+    print("Flagged Issues / Warnings:")
+    for issue in val_report["issues"][:10]:
+        print(f"  - {issue}")
+
+# Abort on critical validation failure
+if val_report["status"] not in ("PASSED", "WARNINGS"):
+    raise RuntimeError(f"Data validation failed: {val_report['issues']}")
+
+# %% [markdown]
+# ## 6. Manifest Generation & Checksum Export
+
+# %%
+import json
+from driftsense.runtime.manifest import ManifestBuilder
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_3",
+    stage="acquire_validate",
+    config_path=CONFIG_PATH,
+    config_sha256=config_sha256,
+    seed=cfg["runtime"]["seed"],
+    dataset_ids=[dataset_cfg["id"]],
+)
+
+# Register acquired dataset and generated quality report
+builder.register_dataset_file(acq_result["path"])
+builder.add_artifact(QUALITY_REPORT_PATH)
+
+MANIFEST_PATH = builder.save(RUN_DIR)
+print(f"Manifest written to: {MANIFEST_PATH}")
+
+# Verify manifest self-consistency
+from driftsense.runtime.manifest import verify_manifest
+is_valid, errors = verify_manifest(RUN_DIR)
+if is_valid:
+    print("Manifest verification: PASS (All artifact SHA256 checksums match)")
+else:
+    raise RuntimeError(f"Manifest verification failed: {errors}")
