@@ -1,0 +1,437 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 06: Root-Cause Attribution Engine & Benchmark
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~1-2 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Attributor Checkpoints: `runs/<run_id>/models/{random,prior,correlation,xgboost}.joblib`  
+# - Validation Attributions Matrix: `runs/<run_id>/val_attributions.csv`  
+# - Validation Attribution Metrics Report: `runs/<run_id>/val_attribute_metrics.json`  
+# - Anomaly Labels & Operational Events Tables: `runs/<run_id>/val_anomaly_labels.json`, `runs/<run_id>/val_operational_events.json`  
+# - Attribution Visualizations: `runs/<run_id>/attribution_comparison.png`  
+# - Cryptographically Verified Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL EVALUATION & ISOLATION INVARIANTS (G6 & A8.4):**  
+# > - **Canonical Cause Taxonomy (Contract 10):** All predictions map to the 6 canonical cause categories (`DEPLOYMENT_DEFECT`, `AUTOSCALING_OVERPROVISION`, `CONFIG_MODIFICATION`, `EXTERNAL_TRAFFIC_SURGE`, `ORPHANED_STORAGE_ACCUMULATION`, `RUNAWAY_BATCH_PROCESS`).  
+# > - **Decoy Event Isolation (Generator Design §3A):** Attributors must discriminate between causal events and benign operations ($E_{\text{decoy}}$) that occur concurrently without cost impact.  
+# > - **Multi-Cause Cascades (Generator Design §3C):** Multi-label ranking evaluates both primary and contributing causes.  
+# > - **A8.4 Test Quarantine:** The test partition ($D_{\text{test}}$, Days 25–30) is strictly locked. No attributions are generated or evaluated on test data.
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+
+# Install driftsense package and dependencies
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+MODELS_DIR = RUN_DIR / "models"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+print(f"Models Directory:     {MODELS_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Configuration & Dataset Split Verification
+
+# %%
+import json
+import numpy as np
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.data.acquire import acquire_dataset
+from driftsense.eval.splits import chronological_split
+from driftsense.features.builder import FeaturePipeline
+
+CONFIG_PATH = "configs/attribute_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg.get("dataset", {})
+attr_cfg = cfg.get("attributors", {})
+eval_cfg = cfg.get("evaluation", {})
+
+train_path = Path(dataset_cfg.get("train_path", "data/splits/train_features.csv"))
+val_path = Path(dataset_cfg.get("val_path", "data/splits/val_features.csv"))
+
+# Verify or regenerate splits if running in a fresh workspace
+if not train_path.is_file() or not val_path.is_file():
+    print("Feature splits not detected locally. Regenerating from pipeline...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+    
+    train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
+    pipeline = FeaturePipeline()
+    pipeline.fit(train_df)
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+    
+    train_path.parent.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(train_path, index=False)
+    val_feats.to_csv(val_path, index=False)
+    test_feats.to_csv(train_path.parent / "test_features.csv", index=False)
+
+# Load training and validation partitions
+df_train = pd.read_csv(train_path, low_memory=False)
+df_val = pd.read_csv(val_path, low_memory=False)
+
+# Strict A8.4 Isolation Guard
+assert "test" not in str(val_path).lower(), "A8.4 VIOLATION: Test split passed into validation evaluator!"
+print(f"Loaded Train Partition: {len(df_train):,} rows ({df_train['ServiceName'].nunique()} services)")
+print(f"Loaded Val Partition:   {len(df_val):,} rows ({df_val['ServiceName'].nunique()} services)")
+
+target_col = dataset_cfg.get("target_col", "EffectiveCost")
+time_col = dataset_cfg.get("time_col", "ChargePeriodStart")
+service_col = dataset_cfg.get("service_col", "ServiceName")
+primary_metric = eval_cfg.get("primary_metric", "top_1_accuracy")
+
+# %% [markdown]
+# ## 5. Load or Generate Calibrated Ground-Truth Incidents & Operational Events
+
+# %%
+from driftsense.synth.injector import SyntheticInjector
+
+val_labels_path = Path(dataset_cfg.get("val_labels_path", ""))
+val_events_path = Path(dataset_cfg.get("val_events_path", ""))
+
+if val_labels_path.is_file() and val_events_path.is_file():
+    print(f"Loading existing incident labels from: {val_labels_path}")
+    with open(val_labels_path, "r", encoding="utf-8") as f:
+        incidents = json.load(f)
+    print(f"Loading existing operational events from: {val_events_path}")
+    with open(val_events_path, "r", encoding="utf-8") as f:
+        events = json.load(f)
+else:
+    print("Generating calibrated synthetic incidents and events on validation dataset...")
+    injector = SyntheticInjector(seed=42, injection_rate=0.03)
+    _, incidents, events = injector.inject(
+        df_val,
+        cost_col=target_col,
+        service_col=service_col,
+        time_col=time_col,
+    )
+
+print(f"Total Incidents: {len(incidents):,}, Total Events: {len(events):,}")
+
+# Save incident labels and events into RUN_DIR for manifest audit
+run_labels_path = RUN_DIR / "val_anomaly_labels.json"
+run_events_path = RUN_DIR / "val_operational_events.json"
+with open(run_labels_path, "w", encoding="utf-8") as f:
+    json.dump(incidents, f, indent=2)
+with open(run_events_path, "w", encoding="utf-8") as f:
+    json.dump(events, f, indent=2)
+
+# Partition incidents into training prior set (60%) and validation evaluation set (40%)
+n_train_inc = max(1, int(len(incidents) * 0.6))
+train_incidents = incidents[:n_train_inc]
+val_incidents = incidents[n_train_inc:]
+
+print(f"Attributor Training Incidents:   {len(train_incidents)}")
+print(f"Attributor Validation Incidents: {len(val_incidents)}")
+
+# %% [markdown]
+# ## 6. Attributor Training & Validation Benchmarking
+
+# %%
+from driftsense.attribute.random_baseline import RandomAttributor
+from driftsense.attribute.prior_baseline import ClassPriorAttributor
+from driftsense.attribute.correlation import TemporalCorrelationAttributor
+from driftsense.attribute.xgb_attributor import XGBoostAttributor
+from driftsense.eval.attribution_metrics import (
+    evaluate_attribution_suite,
+    compute_taxonomy_confusion_matrix,
+)
+
+attributors = [
+    RandomAttributor(seed=attr_cfg.get("random", {}).get("seed", 42)),
+    ClassPriorAttributor(),
+    TemporalCorrelationAttributor(
+        lookback_hours=attr_cfg.get("correlation", {}).get("lookback_hours", 3.0),
+        decay_halflife_hours=attr_cfg.get("correlation", {}).get("decay_halflife_hours", 1.0),
+        service_match_multiplier=attr_cfg.get("correlation", {}).get("service_match_multiplier", 2.0),
+        config=attr_cfg.get("correlation", {}),
+    ),
+    XGBoostAttributor(
+        n_estimators=attr_cfg.get("xgboost", {}).get("n_estimators", 100),
+        max_depth=attr_cfg.get("xgboost", {}).get("max_depth", 4),
+        learning_rate=attr_cfg.get("xgboost", {}).get("learning_rate", 0.05),
+        lookback_hours=attr_cfg.get("xgboost", {}).get("lookback_hours", 4.0),
+        seed=attr_cfg.get("xgboost", {}).get("seed", 42),
+        config=attr_cfg.get("xgboost", {}),
+    ),
+]
+
+saved_checkpoints = []
+results = {}
+y_true_val = [inc["primary_cause"] for inc in val_incidents]
+top3_preds_by_model = {}
+
+print("=== Fitting Attributors on Historical Incident Prior Set ===")
+for i, model in enumerate(attributors, 1):
+    print(f"\n[{i}/{len(attributors)}] Fitting {model.name}...")
+    model.fit(train_incidents, events)
+
+    top3_preds = model.predict_top_k(val_incidents, events, k=3)
+    top3_preds_by_model[model.name] = top3_preds
+
+    metrics = evaluate_attribution_suite(y_true_val, top3_preds)
+    conf_mat = compute_taxonomy_confusion_matrix(y_true_val, top3_preds)
+
+    results[model.name] = {
+        "metrics": metrics,
+        "confusion_matrix": conf_mat,
+        "metadata": model.get_metadata(),
+    }
+
+    chk = model.save(MODELS_DIR)
+    saved_checkpoints.append(str(chk))
+    print(
+        f"    Checkpointed: {chk.name} "
+        f"(Top-1 Acc: {metrics['top_1_accuracy']*100:.1f}%, "
+        f"Top-2 Acc: {metrics['top_2_accuracy']*100:.1f}%, "
+        f"Top-3 Acc: {metrics['top_3_accuracy']*100:.1f}%)"
+    )
+
+print("\n" + "=" * 90)
+print("DRIFTSENSE — VALIDATION ROOT CAUSE ATTRIBUTION BENCHMARK")
+print("=" * 90)
+header = f"{'Attributor':<25} | {'Top-1 Acc (%)':<15} | {'Top-2 Acc (%)':<15} | {'Top-3 Acc (%)':<15} | {'MRR':<10}"
+print(header)
+print("-" * len(header))
+for name, res in results.items():
+    m = res["metrics"]
+    print(
+        f"{name:<25} | {m['top_1_accuracy']*100:<15.2f} | {m['top_2_accuracy']*100:<15.2f} | {m['top_3_accuracy']*100:<15.2f} | {m['mrr']:<10.4f}"
+    )
+
+champion_name = max(
+    results.keys(),
+    key=lambda k: results[k]["metrics"].get(primary_metric, 0.0),
+)
+print("=" * 90)
+print(f"CHAMPION ATTRIBUTOR SELECTED: '{champion_name}' (Highest {primary_metric.upper()} on Validation Incidents)")
+print("=" * 90)
+
+# Build and save validation attributions table
+attributions_records = []
+for idx, inc in enumerate(val_incidents):
+    row = {
+        "incident_id": inc.get("incident_id", inc.get("label_id", f"inc_{idx}")),
+        "service_name": inc.get("service_name", inc.get("service_id", "")),
+        "start_timestamp": inc.get("start_timestamp", inc.get("onset_timestamp", "")),
+        "primary_cause_true": inc.get("primary_cause", ""),
+    }
+    for name in results.keys():
+        preds = top3_preds_by_model[name][idx]
+        row[f"{name}_top1"] = preds[0] if len(preds) > 0 else ""
+        row[f"{name}_top2"] = preds[1] if len(preds) > 1 else ""
+        row[f"{name}_top3"] = preds[2] if len(preds) > 2 else ""
+    attributions_records.append(row)
+
+val_attributions_df = pd.DataFrame(attributions_records)
+val_attributions_path = RUN_DIR / "val_attributions.csv"
+val_attributions_df.to_csv(val_attributions_path, index=False)
+print(f"\nSaved validation attributions matrix to: {val_attributions_path}")
+
+# Save validation attribution metrics report
+metrics_payload = {
+    "run_id": RUN_ID,
+    "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "primary_metric": primary_metric,
+    "champion_attributor": champion_name,
+    "total_incidents": len(incidents),
+    "train_incidents": len(train_incidents),
+    "validation_incidents": len(val_incidents),
+    "models": results,
+}
+val_metrics_path = RUN_DIR / "val_attribute_metrics.json"
+with open(val_metrics_path, "w", encoding="utf-8") as f:
+    json.dump(metrics_payload, f, indent=2)
+print(f"Saved validation attribution metrics to: {val_metrics_path}")
+
+# %% [markdown]
+# ## 7. Attribution Visualizations
+
+# %%
+import matplotlib.pyplot as plt
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+# Subplot 1: Top-k Accuracy Comparison
+model_names = list(results.keys())
+x = np.arange(len(model_names))
+width = 0.25
+
+top1_scores = [results[m]["metrics"]["top_1_accuracy"] * 100 for m in model_names]
+top2_scores = [results[m]["metrics"]["top_2_accuracy"] * 100 for m in model_names]
+top3_scores = [results[m]["metrics"]["top_3_accuracy"] * 100 for m in model_names]
+
+rects1 = ax1.bar(x - width, top1_scores, width, label="Top-1 Accuracy (%)", color="#2b5c8f")
+rects2 = ax1.bar(x, top2_scores, width, label="Top-2 Accuracy (%)", color="#4682b4")
+rects3 = ax1.bar(x + width, top3_scores, width, label="Top-3 Accuracy (%)", color="#87ceeb")
+
+ax1.set_ylabel("Accuracy (%)", fontsize=11, fontweight="bold")
+ax1.set_title("Root-Cause Attribution Accuracy by Model (Validation)", fontsize=12, fontweight="bold")
+ax1.set_xticks(x)
+ax1.set_xticklabels([m.replace("_attributor", "") for m in model_names], rotation=15, ha="right")
+ax1.set_ylim(0, 105)
+ax1.grid(True, axis="y", alpha=0.3)
+ax1.legend(loc="upper left")
+
+# Subplot 2: Champion Attributor Per-Class Recall across Canonical Taxonomy
+champ_recall = results[champion_name]["confusion_matrix"]["per_class_recall"]
+classes = list(champ_recall.keys())
+recall_pcts = [champ_recall[c] * 100 for c in classes]
+
+short_classes = [c.replace("_", "\n") for c in classes]
+bars = ax2.bar(short_classes, recall_pcts, color="#2e8b57", alpha=0.85, edgecolor="darkgreen")
+
+ax2.set_ylabel("Per-Class Recall (%)", fontsize=11, fontweight="bold")
+ax2.set_title(f"Champion ({champion_name}) Per-Class Recall (Contract 10)", fontsize=12, fontweight="bold")
+ax2.set_ylim(0, 105)
+ax2.grid(True, axis="y", alpha=0.3)
+
+for bar in bars:
+    yval = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.5, f"{yval:.1f}%", ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+plt.tight_layout()
+plot_path = RUN_DIR / "attribution_comparison.png"
+fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+plt.close(fig)
+print(f"Saved attribution comparison visualization to: {plot_path}")
+
+# %% [markdown]
+# ## 8. Run Manifest Compilation & Anti-Leakage Audit
+
+# %%
+from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
+from driftsense.runtime.seed import set_seed
+
+set_seed(cfg.get("runtime", {}).get("seed", 42))
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_8",
+    stage="cause_attribution",
+    config_path=CONFIG_PATH,
+    seed=cfg.get("runtime", {}).get("seed", 42),
+)
+
+builder.add_dataset(str(train_path))
+builder.add_dataset(str(val_path))
+
+for chk in saved_checkpoints:
+    builder.add_artifact(chk)
+builder.add_artifact(str(val_metrics_path))
+builder.add_artifact(str(val_attributions_path))
+builder.add_artifact(str(run_labels_path))
+builder.add_artifact(str(run_events_path))
+builder.add_artifact(str(plot_path))
+
+manifest_path = builder.save(RUN_DIR)
+print(f"\nManifest successfully emitted to: {manifest_path}")
+
+# Strict A8.4 Anti-Leakage Audit
+manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+for art in manifest_data.get("artifacts", []):
+    path_str = art.get("path", "").lower()
+    assert "test_features" not in path_str, f"A8.4 LEAKAGE: Test split found in manifest: {path_str}"
+    assert "test_attribute" not in path_str, f"A8.4 LEAKAGE: Test attributions found in manifest: {path_str}"
+
+print("PASS: A8.4 Anti-Leakage Invariant Verified (Zero test artifacts in manifest).")
+
+is_valid, errors = verify_manifest(RUN_DIR, require_datasets=True)
+if is_valid:
+    print("PASS: Run manifest verification succeeded (All SHA256 checksums verified).")
+else:
+    print(f"FAIL: Manifest verification failed: {errors}")
+    sys.exit(1)
+
+# %% [markdown]
+# ## 9. Artifact Archival & Download
+
+# %%
+import shutil
+
+zip_filename = f"{RUN_ID}.zip"
+zip_path = shutil.make_archive(RUN_ID, "zip", RUN_DIR)
+shutil.move(zip_path, zip_filename)
+print(f"\nRun artifacts successfully archived to: {zip_filename} ({os.path.getsize(zip_filename):,} bytes)")
+
+try:
+    from google.colab import files
+    print("Triggering browser download for Colab run archive...")
+    files.download(zip_filename)
+except ImportError:
+    print(f"Local environment: Run artifacts available at {RUN_DIR.resolve()}")

@@ -1,0 +1,44 @@
+# DriftSense — Root Cause Attribution Configuration
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Note: Test split (data/splits/test_features.csv) is strictly locked and quarantined during Phase 8
+  val_labels_path: "runs/run_20261019_174627_660563/val_anomaly_labels.json"
+  val_events_path: "runs/run_20261019_174627_660563/val_operational_events.json"
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+
+attributors:
+  random:
+    enabled: true
+    seed: 42
+  prior:
+    enabled: true
+  correlation:
+    enabled: true
+    lookback_hours: 3.0
+    decay_halflife_hours: 1.0
+    service_match_multiplier: 2.0
+  xgboost:
+    enabled: true
+    n_estimators: 100
+    max_depth: 4
+    learning_rate: 0.05
+    lookback_hours: 4.0
+    seed: 42
+
+evaluation:
+  primary_metric: "top_1_accuracy"
+  top_k: 3
+
+output:
+  attributors_dir: "models/attribute"
+  metrics_path: "metrics/val_attribute_metrics.json"
+  val_attributions_path: "data/predictions/val_attributions.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_8"
+  stage: "cause_attribution"

@@ -791,6 +791,208 @@ def cmd_detect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_attribute(args: argparse.Namespace) -> int:
+    """Train and evaluate root-cause attribution baselines and ML models."""
+    import json
+    from pathlib import Path
+
+    import pandas as pd
+
+    from driftsense.attribute.base import BaseAttributor
+    from driftsense.attribute.correlation import TemporalCorrelationAttributor
+    from driftsense.attribute.prior_baseline import ClassPriorAttributor
+    from driftsense.attribute.random_baseline import RandomAttributor
+    from driftsense.attribute.xgb_attributor import XGBoostAttributor
+    from driftsense.eval.attribution_metrics import evaluate_attribution_suite
+    from driftsense.synth.injector import SyntheticInjector
+
+    cfg: dict = {}
+    if args.config:
+        loaded, _ = load_config(args.config)
+        cfg = loaded
+
+    ds_cfg = cfg.get("dataset", {})
+    attr_cfg = cfg.get("attributors", {})
+    eval_cfg = cfg.get("evaluation", {})
+    out_cfg = cfg.get("output", {})
+
+    train_path = args.train or ds_cfg.get(
+        "train_path", "data/splits/train_features.csv"
+    )
+    val_path = args.val or ds_cfg.get("val_path", "data/splits/val_features.csv")
+    attributors_dir = Path(
+        args.attributors_dir or out_cfg.get("attributors_dir", "models/attribute")
+    )
+    metrics_path = Path(
+        args.metrics_out
+        or out_cfg.get("metrics_path", "metrics/val_attribute_metrics.json")
+    )
+    val_attributions_path = Path(
+        args.predictions_out
+        or out_cfg.get("val_attributions_path", "data/predictions/val_attributions.csv")
+    )
+
+    if not Path(train_path).is_file():
+        print(f"ERROR: Train split not found at {train_path}", file=sys.stderr)
+        return 1
+    if not Path(val_path).is_file():
+        print(f"ERROR: Validation split not found at {val_path}", file=sys.stderr)
+        return 1
+
+    # Strict A8.4 quarantine check: ensure test split is never evaluated during Phase 8
+    if "test" in str(val_path).lower():
+        print(
+            "ERROR: A8.4 Violation — Test split evaluation is strictly forbidden during Phase 8.",
+            file=sys.stderr,
+        )
+        return 1
+
+    val_labels_path = Path(
+        ds_cfg.get(
+            "val_labels_path",
+            "runs/run_20261019_174627_660563/val_anomaly_labels.json",
+        )
+    )
+    val_events_path = Path(
+        ds_cfg.get(
+            "val_events_path",
+            "runs/run_20261019_174627_660563/val_operational_events.json",
+        )
+    )
+
+    if val_labels_path.is_file() and val_events_path.is_file():
+        print(f"Loading incident labels from: {val_labels_path}")
+        with open(val_labels_path, "r", encoding="utf-8") as f:
+            incidents = json.load(f)
+        print(f"Loading operational events from: {val_events_path}")
+        with open(val_events_path, "r", encoding="utf-8") as f:
+            events = json.load(f)
+    else:
+        print(
+            "Generating calibrated synthetic incidents and events on validation dataset..."
+        )
+        df_val = pd.read_csv(val_path, low_memory=False)
+        injector = SyntheticInjector(seed=42, injection_rate=0.03)
+        _, incidents, events = injector.inject(df_val)
+
+    print(f"Total Incidents: {len(incidents):,}, Total Events: {len(events):,}")
+
+    n_train_inc = max(1, int(len(incidents) * 0.6))
+    train_incidents = incidents[:n_train_inc]
+    val_incidents = incidents[n_train_inc:]
+
+    print(
+        f"Attributor Train Incidents: {len(train_incidents)}, Validation Incidents: {len(val_incidents)}"
+    )
+
+    attributors: list[BaseAttributor] = []
+    if attr_cfg.get("random", {}).get("enabled", True):
+        attributors.append(
+            RandomAttributor(seed=attr_cfg.get("random", {}).get("seed", 42))
+        )
+    if attr_cfg.get("prior", {}).get("enabled", True):
+        attributors.append(ClassPriorAttributor())
+    if attr_cfg.get("correlation", {}).get("enabled", True):
+        c_cfg = attr_cfg.get("correlation", {})
+        attributors.append(
+            TemporalCorrelationAttributor(
+                lookback_hours=c_cfg.get("lookback_hours", 3.0),
+                decay_halflife_hours=c_cfg.get("decay_halflife_hours", 1.0),
+                service_match_multiplier=c_cfg.get("service_match_multiplier", 2.0),
+            )
+        )
+    if attr_cfg.get("xgboost", {}).get("enabled", True):
+        x_cfg = attr_cfg.get("xgboost", {})
+        attributors.append(
+            XGBoostAttributor(
+                n_estimators=x_cfg.get("n_estimators", 100),
+                max_depth=x_cfg.get("max_depth", 4),
+                learning_rate=x_cfg.get("learning_rate", 0.05),
+                lookback_hours=x_cfg.get("lookback_hours", 4.0),
+                seed=x_cfg.get("seed", 42),
+            )
+        )
+
+    attributors_dir.mkdir(parents=True, exist_ok=True)
+    results = {}
+    y_true_val = [inc["primary_cause"] for inc in val_incidents]
+    attributions_records = []
+
+    print("\n=== Fitting Attributors on Historical Incidents ===")
+    for i, model in enumerate(attributors, 1):
+        print(f"[{i}/{len(attributors)}] Fitting {model.name}...")
+        model.fit(train_incidents, events)
+
+        top3_preds = model.predict_top_k(val_incidents, events, k=3)
+        metrics = evaluate_attribution_suite(y_true_val, top3_preds)
+        results[model.name] = {
+            "metrics": metrics,
+            "metadata": model.get_metadata(),
+        }
+
+        chk = model.save(attributors_dir)
+        print(
+            f"    Checkpointed: {chk.name} (Top-1 Acc: {metrics['top_1_accuracy'] * 100:.1f}%, Top-3 Acc: {metrics['top_3_accuracy'] * 100:.1f}%)"
+        )
+
+    print("\n" + "=" * 80)
+    print("DRIFTSENSE — VALIDATION ROOT CAUSE ATTRIBUTION BENCHMARK")
+    print("=" * 80)
+    header = f"{'Attributor':<25} | {'Top-1 Acc (%)':<15} | {'Top-2 Acc (%)':<15} | {'Top-3 Acc (%)':<15}"
+    print(header)
+    print("-" * len(header))
+    for name, res in results.items():
+        m = res["metrics"]
+        print(
+            f"{name:<25} | {m['top_1_accuracy'] * 100:<15.2f} | {m['top_2_accuracy'] * 100:<15.2f} | {m['top_3_accuracy'] * 100:<15.2f}"
+        )
+
+    primary_metric = eval_cfg.get("primary_metric", "top_1_accuracy")
+    champion_name = max(
+        results.keys(), key=lambda k: results[k]["metrics"].get(primary_metric, 0.0)
+    )
+    print("=" * 80)
+    print(
+        f"CHAMPION ATTRIBUTOR SELECTED: '{champion_name}' (Highest {primary_metric.upper()} on Validation Incidents)"
+    )
+    print("=" * 80)
+
+    summary_payload = {
+        "primary_metric": primary_metric,
+        "champion_attributor": champion_name,
+        "total_incidents": len(incidents),
+        "train_incidents": len(train_incidents),
+        "validation_incidents": len(val_incidents),
+        "models": results,
+    }
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, indent=2)
+    print(f"\nSaved validation attribution metrics to: {metrics_path}")
+
+    for inc in val_incidents:
+        row = {
+            "label_id": inc.get("label_id"),
+            "service_id": inc.get("service_id"),
+            "onset_timestamp": inc.get("onset_timestamp"),
+            "primary_cause_true": inc.get("primary_cause"),
+        }
+        for name in results:
+            top_preds = attributors[
+                [a.name for a in attributors].index(name)
+            ].predict_top_k([inc], events, k=3)[0]
+            row[f"{name}_top1"] = top_preds[0] if len(top_preds) > 0 else ""
+            row[f"{name}_top2"] = top_preds[1] if len(top_preds) > 1 else ""
+            row[f"{name}_top3"] = top_preds[2] if len(top_preds) > 2 else ""
+        attributions_records.append(row)
+
+    val_attributions_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(attributions_records).to_csv(val_attributions_path, index=False)
+    print(f"Saved validation attributions matrix to:  {val_attributions_path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI Entry point."""
     parser = argparse.ArgumentParser(
@@ -902,6 +1104,23 @@ def main(argv: list[str] | None = None) -> int:
         "--predictions-out", help="Path to output validation detections CSV"
     )
     p_det.set_defaults(func=cmd_detect)
+
+    # attribute
+    p_att = subparsers.add_parser(
+        "attribute",
+        help="Train and evaluate root-cause attribution baselines and ML models",
+    )
+    p_att.add_argument("--config", help="Path to attribute configuration YAML")
+    p_att.add_argument("--train", help="Path to training features CSV")
+    p_att.add_argument("--val", help="Path to validation features CSV")
+    p_att.add_argument(
+        "--attributors-dir", help="Directory to save serialized attributors"
+    )
+    p_att.add_argument("--metrics-out", help="Path to output validation metrics JSON")
+    p_att.add_argument(
+        "--predictions-out", help="Path to output validation attributions CSV"
+    )
+    p_att.set_defaults(func=cmd_attribute)
 
     parsed = parser.parse_args(argv)
     return parsed.func(parsed)
