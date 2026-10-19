@@ -1,0 +1,42 @@
+# DriftSense — Feature Engineering & Chronological Partitioning Configuration
+
+dataset:
+  input_path: "data/processed/focus_aggregated_1h.csv"
+  output_path: "data/processed/focus_features_1h.csv"
+  splits_dir: "data/splits"
+
+features:
+  target_col: "EffectiveCost"
+  service_col: "ServiceName"
+  time_col: "ChargePeriodStart"
+  usage_col: "ConsumedQuantity"
+  cost_lags:
+    - 1
+    - 2
+    - 3
+    - 24
+    - 168
+  cost_windows:
+    - 3
+    - 6
+    - 24
+    - 168
+  usage_lags:
+    - 1
+    - 2
+    - 24
+  usage_windows:
+    - 6
+    - 24
+  scale_features: false
+
+splits:
+  train_frac: 0.60
+  val_frac: 0.20
+  test_frac: 0.20
+  purge_gap_hours: 0
+
+runtime:
+  seed: 42
+  phase: "PHASE_5"
+  stage: "feature_engineering"

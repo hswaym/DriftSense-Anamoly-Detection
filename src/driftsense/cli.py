@@ -222,6 +222,92 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_features(args: argparse.Namespace) -> int:
+    """Execute feature engineering and chronological dataset splitting."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    from driftsense.eval.splits import chronological_split
+    from driftsense.features.builder import FeaturePipeline
+
+    cfg: dict = {}
+    if args.config:
+        loaded, _ = load_config(args.config)
+        cfg = loaded
+
+    ds_cfg = cfg.get("dataset", {})
+    feat_cfg = cfg.get("features", {})
+    split_cfg = cfg.get("splits", {})
+
+    input_path = args.input or ds_cfg.get("input_path")
+    if not input_path or not Path(input_path).is_file():
+        print(
+            f"ERROR: Valid input dataset path required (found: {input_path}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    output_path = args.output or ds_cfg.get(
+        "output_path", "data/processed/focus_features_1h.csv"
+    )
+    splits_dir = Path(args.splits_dir or ds_cfg.get("splits_dir", "data/splits"))
+
+    print(f"Loading dataset from {input_path}...")
+    df = pd.read_csv(input_path, low_memory=False)
+
+    train_df, val_df, test_df, split_info = chronological_split(
+        df,
+        time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
+        train_frac=split_cfg.get("train_frac", 0.60),
+        val_frac=split_cfg.get("val_frac", 0.20),
+        test_frac=split_cfg.get("test_frac", 0.20),
+        purge_gap_hours=split_cfg.get("purge_gap_hours", 0),
+    )
+
+    print("=== Chronological Split Summary ===")
+    print(
+        f"Train Slice: {split_info.train_rows:,} rows ({split_info.train_start} -> {split_info.train_end})"
+    )
+    print(
+        f"Val Slice:   {split_info.val_rows:,} rows ({split_info.val_start} -> {split_info.val_end})"
+    )
+    print(
+        f"Test Slice:  {split_info.test_rows:,} rows ({split_info.test_start} -> {split_info.test_end})"
+    )
+
+    pipeline = FeaturePipeline(
+        target_col=feat_cfg.get("target_col", "EffectiveCost"),
+        service_col=feat_cfg.get("service_col", "ServiceName"),
+        time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
+        usage_col=feat_cfg.get("usage_col", "ConsumedQuantity"),
+        cost_lags=feat_cfg.get("cost_lags", [1, 2, 3, 24, 168]),
+        cost_windows=feat_cfg.get("cost_windows", [3, 6, 24, 168]),
+        usage_lags=feat_cfg.get("usage_lags", [1, 2, 24]),
+        usage_windows=feat_cfg.get("usage_windows", [6, 24]),
+        scale_features=feat_cfg.get("scale_features", False),
+    )
+    pipeline.fit(train_df)
+
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+
+    splits_dir.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(splits_dir / "train_features.csv", index=False)
+    val_feats.to_csv(splits_dir / "val_features.csv", index=False)
+    test_feats.to_csv(splits_dir / "test_features.csv", index=False)
+
+    full_feats = pd.concat([train_feats, val_feats, test_feats], ignore_index=True)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    full_feats.to_csv(output_path, index=False)
+
+    print(f"\nGenerated {len(pipeline.feature_names_)} engineered features.")
+    print(f"Saved splits to: {splits_dir}")
+    print(f"Saved full feature matrix to: {output_path} ({len(full_feats):,} rows)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI Entry point."""
     parser = argparse.ArgumentParser(
@@ -290,6 +376,19 @@ def main(argv: list[str] | None = None) -> int:
     p_cln.add_argument("--grain", default="1h", help="Canonical grain ('1h', '1D')")
     p_cln.add_argument("--agg-output", help="Path to output aggregated CSV")
     p_cln.set_defaults(func=cmd_clean)
+
+    # features
+    p_feat = subparsers.add_parser(
+        "features",
+        help="Engineer temporal, usage, and event features with chronological splits",
+    )
+    p_feat.add_argument("--config", help="Path to features configuration YAML")
+    p_feat.add_argument("--input", help="Path to aggregated CSV dataset")
+    p_feat.add_argument("--output", help="Path to output full features CSV")
+    p_feat.add_argument(
+        "--splits-dir", help="Directory to save train/val/test CSV splits"
+    )
+    p_feat.set_defaults(func=cmd_features)
 
     parsed = parser.parse_args(argv)
     return parsed.func(parsed)

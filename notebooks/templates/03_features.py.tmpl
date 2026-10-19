@@ -1,0 +1,257 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 03: Feature Engineering and Chronological Partitioning
+#
+# **Runtime Type:** Python 3 (CPU)  
+# **Estimated Runtime:** ~1-2 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Full Feature Matrix: `data/processed/focus_features_1h.csv`  
+# - Train Partition: `data/splits/train_features.csv`  
+# - Validation Partition: `data/splits/val_features.csv`  
+# - Test Partition: `data/splits/test_features.csv`  
+# - Split Metadata Summary: `runs/<run_id>/split_summary.json`  
+# - Run Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL ANTI-LEAKAGE INVARIANTS (G6 & Contract 8):**  
+# > - Split chronologically BEFORE fitting any scaler, encoder, or learned feature.  
+# > - Fit all feature transformers strictly on the training partition ($D_{\text{train}}$).  
+# > - Rolling windows and usage metrics compute strictly over historical observations ($< t$).  
+# > - Ground-truth anomaly labels are strictly quarantined from all feature matrices.
+
+# %% [markdown]
+# ## 1. Setup & Environment Installation
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "main"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+
+# Clone if running on fresh Colab runtime
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        os.chdir("repo")
+    if PINNED_COMMIT_SHA != "main":
+        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
+
+# Install driftsense package and dependencies
+print("Installing driftsense in development mode...")
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
+
+print("Environment setup complete.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostics
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Storage Setup & Run Directory Initialization
+
+# %%
+import uuid
+import datetime
+
+RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+RUN_DIR = Path(f"runs/{RUN_ID}")
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+print(f"Active Run Directory: {RUN_DIR.resolve()}")
+
+# %% [markdown]
+# ## 4. Input Verification & Aggregated Data Acquisition
+
+# %%
+import json
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.data.acquire import acquire_dataset
+
+CONFIG_PATH = "configs/features_focus.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+
+dataset_cfg = cfg.get("dataset", {})
+feat_cfg = cfg.get("features", {})
+split_cfg = cfg.get("splits", {})
+
+input_path = Path(dataset_cfg.get("input_path", "data/processed/focus_aggregated_1h.csv"))
+if not input_path.is_file():
+    print(f"Aggregated input dataset not found at {input_path}. Regenerating from raw dataset...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+    df_agg.to_csv(input_path, index=False)
+    print(f"Aggregated dataset generated at {input_path}")
+
+print(f"Loading input aggregated series from {input_path}...")
+df_input = pd.read_csv(input_path, low_memory=False)
+print(f"Input records: {len(df_input):,} rows across {df_input['ServiceName'].nunique()} services.")
+
+# %% [markdown]
+# ## 5. Chronological Partitioning (Train / Val / Test)
+
+# %%
+from driftsense.eval.splits import chronological_split
+
+train_df, val_df, test_df, split_info = chronological_split(
+    df_input,
+    time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
+    train_frac=split_cfg.get("train_frac", 0.60),
+    val_frac=split_cfg.get("val_frac", 0.20),
+    test_frac=split_cfg.get("test_frac", 0.20),
+    purge_gap_hours=split_cfg.get("purge_gap_hours", 0),
+)
+
+print("\n=== Chronological Split Boundaries ===")
+print(f"Train Slice: {split_info.train_rows:,} rows ({split_info.train_start} -> {split_info.train_end})")
+print(f"Val Slice:   {split_info.val_rows:,} rows ({split_info.val_start} -> {split_info.val_end})")
+print(f"Test Slice:  {split_info.test_rows:,} rows ({split_info.test_start} -> {split_info.test_end})")
+
+# Assert zero overlap
+assert split_info.train_end < split_info.val_start, "Leakage: Train overlaps with Validation!"
+assert split_info.val_end < split_info.test_start, "Leakage: Validation overlaps with Test!"
+
+# Save split summary
+split_summary = {
+    "train_rows": split_info.train_rows,
+    "val_rows": split_info.val_rows,
+    "test_rows": split_info.test_rows,
+    "train_start_utc": str(split_info.train_start),
+    "train_end_utc": str(split_info.train_end),
+    "val_start_utc": str(split_info.val_start),
+    "val_end_utc": str(split_info.val_end),
+    "test_start_utc": str(split_info.test_start),
+    "test_end_utc": str(split_info.test_end),
+}
+split_summary_path = RUN_DIR / "split_summary.json"
+with open(split_summary_path, "w", encoding="utf-8") as f:
+    json.dump(split_summary, f, indent=2)
+
+# %% [markdown]
+# ## 6. Feature Pipeline Execution (Fit-on-Train)
+
+# %%
+from driftsense.features.builder import FeaturePipeline
+
+pipeline = FeaturePipeline(
+    target_col=feat_cfg.get("target_col", "EffectiveCost"),
+    service_col=feat_cfg.get("service_col", "ServiceName"),
+    time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
+    usage_col=feat_cfg.get("usage_col", "ConsumedQuantity"),
+    cost_lags=feat_cfg.get("cost_lags", [1, 2, 3, 24, 168]),
+    cost_windows=feat_cfg.get("cost_windows", [3, 6, 24, 168]),
+    usage_lags=feat_cfg.get("usage_lags", [1, 2, 24]),
+    usage_windows=feat_cfg.get("usage_windows", [6, 24]),
+    scale_features=feat_cfg.get("scale_features", False),
+)
+
+# Fit strictly on train partition
+print("Fitting FeaturePipeline on train partition...")
+pipeline.fit(train_df)
+
+# Transform each partition using frozen parameters
+print("Transforming train, val, and test partitions...")
+train_feats = pipeline.transform(train_df)
+val_feats = pipeline.transform(val_df)
+test_feats = pipeline.transform(test_df)
+
+# Save partition files
+splits_dir = Path(dataset_cfg.get("splits_dir", "data/splits"))
+splits_dir.mkdir(parents=True, exist_ok=True)
+
+train_split_path = splits_dir / "train_features.csv"
+val_split_path = splits_dir / "val_features.csv"
+test_split_path = splits_dir / "test_features.csv"
+
+train_feats.to_csv(train_split_path, index=False)
+val_feats.to_csv(val_split_path, index=False)
+test_feats.to_csv(test_split_path, index=False)
+
+print(f"Saved train features: {train_split_path} ({train_split_path.stat().st_size:,} bytes)")
+print(f"Saved val features:   {val_split_path} ({val_split_path.stat().st_size:,} bytes)")
+print(f"Saved test features:  {test_split_path} ({test_split_path.stat().st_size:,} bytes)")
+
+# Combined feature matrix
+output_feat_path = Path(dataset_cfg.get("output_path", "data/processed/focus_features_1h.csv"))
+output_feat_path.parent.mkdir(parents=True, exist_ok=True)
+full_feats = pd.concat([train_feats, val_feats, test_feats], ignore_index=True)
+full_feats.to_csv(output_feat_path, index=False)
+
+print(f"\nFull feature matrix saved to: {output_feat_path} ({output_feat_path.stat().st_size:,} bytes)")
+print(f"Total Rows: {len(full_feats):,} | Total Columns: {len(full_feats.columns)}")
+print(f"Engineered Features ({len(pipeline.feature_names_)}): {pipeline.feature_names_[:8]} ...")
+
+# %% [markdown]
+# ## 7. Manifest Compilation and Integrity Verification
+
+# %%
+from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
+from driftsense.runtime.seed import set_seed
+
+set_seed(cfg.get("runtime", {}).get("seed", 42))
+
+builder = ManifestBuilder(
+    run_id=RUN_ID,
+    phase="PHASE_5",
+    stage="feature_engineering",
+    config_path=CONFIG_PATH,
+    seed=cfg.get("runtime", {}).get("seed", 42),
+)
+
+builder.add_dataset(str(input_path))
+builder.add_artifact(str(split_summary_path))
+builder.add_artifact(str(train_split_path))
+builder.add_artifact(str(val_split_path))
+builder.add_artifact(str(test_split_path))
+builder.add_artifact(str(output_feat_path))
+
+manifest_path = builder.save(RUN_DIR)
+print(f"\nManifest successfully generated at: {manifest_path}")
+
+is_valid, errors = verify_manifest(RUN_DIR, require_datasets=True)
+if is_valid:
+    print("PASS: Run manifest verification succeeded (All SHA256 checksums verified).")
+else:
+    print(f"FAIL: Manifest verification failed: {errors}")
+    sys.exit(1)
