@@ -40,38 +40,48 @@ import sys
 import subprocess
 from pathlib import Path
 
-# Pinned repository commit SHA or branch for reproducibility
-PINNED_COMMIT_SHA = "main"
-REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
+# Self-healing repository location check
+if os.path.exists("repo/src/driftsense"):
+    os.chdir("repo")
 
-# Clone if running on fresh Colab runtime
+# Clone repository if running on a fresh Colab instance
 if not os.path.exists("src/driftsense"):
-    if os.path.exists("repo"):
+    if os.path.exists("repo/src/driftsense"):
         os.chdir("repo")
     else:
-        print("Cloning repository in Google Colab...")
-        subprocess.run(["git", "clone", REPO_URL, "repo"], check=True)
+        print("Cloning DriftSense repository in Colab...")
+        subprocess.run(
+            ["git", "clone", "https://github.com/hswaym/DriftSense-Anamoly-Detection.git", "repo"],
+            check=True,
+        )
         os.chdir("repo")
-    if PINNED_COMMIT_SHA != "main":
-        subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
-else:
-    subprocess.run(["git", "pull", "origin", "main"], check=False)
 
-# Install driftsense package and dependencies
-print("Installing driftsense in development mode...")
+# Pull latest commits
+subprocess.run(["git", "pull", "origin", "main"], check=False)
+
+# Install driftsense in editable mode
+print("Installing driftsense package...")
 subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
 
-# Ensure src directory is on sys.path for active Colab kernel
-src_dir = os.path.abspath("src")
-if src_dir not in sys.path:
-    sys.path.insert(0, src_dir)
+# Defensive path insertion for active Colab kernel
+for candidate in ["src", "repo/src", os.path.abspath("src")]:
+    if os.path.exists(candidate) and os.path.abspath(candidate) not in sys.path:
+        sys.path.insert(0, os.path.abspath(candidate))
 
-print(f"Environment setup complete. Added {src_dir} to sys.path.")
+print(f"Environment ready. Current working directory: {os.getcwd()}")
+print(f"sys.path: {sys.path[:3]}")
 
 # %% [markdown]
 # ## 2. Hardware Diagnostics
 
 # %%
+import os
+import sys
+
+# Ensure src on sys.path
+if os.path.exists("src") and os.path.abspath("src") not in sys.path:
+    sys.path.insert(0, os.path.abspath("src"))
+
 from driftsense.runtime.hardware import check_hardware
 
 hw = check_hardware(requested_device="cpu")
@@ -85,6 +95,7 @@ for k, v in hw.items():
 # %%
 import uuid
 import datetime
+from pathlib import Path
 
 RUN_ID = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 RUN_DIR = Path(f"runs/{RUN_ID}")
@@ -95,9 +106,16 @@ print(f"Active Run Directory: {RUN_DIR.resolve()}")
 # ## 4. Protocol Verification & Split Anti-Leakage Audit
 
 # %%
+import os
+import sys
+
+if os.path.exists("src") and os.path.abspath("src") not in sys.path:
+    sys.path.insert(0, os.path.abspath("src"))
+
 import json
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from driftsense.runtime.config import load_config
 from driftsense.eval.ablation import (
     AblationRunner,
@@ -106,6 +124,12 @@ from driftsense.eval.ablation import (
     hash_file_sha256,
     SYNTHETIC_EVENT_CIRCULARITY_CAVEAT,
 )
+from driftsense.data.acquire import acquire_dataset
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.eval.splits import chronological_split
+from driftsense.features.builder import FeaturePipeline
+from driftsense.synth.injector import SyntheticInjector
 
 CONFIG_PATH = "configs/ablation_focus.yaml"
 cfg, config_sha256 = load_config(CONFIG_PATH)
@@ -117,13 +141,38 @@ actual_protocol_hash = hash_file_sha256(protocol_path)
 print(f"Experiment Protocol Path:   {protocol_path}")
 print(f"Expected Protocol SHA256:   {expected_protocol_hash}")
 print(f"Actual Protocol SHA256:     {actual_protocol_hash}")
-assert actual_protocol_hash == expected_protocol_hash, "PROTOCOL DRIFT: Protocol hash mismatch!"
+assert actual_protocol_hash == expected_protocol_hash, f"PROTOCOL DRIFT: Expected {expected_protocol_hash}, got {actual_protocol_hash}"
 print("PASS: Experiment Protocol Verified and Unmodified.")
 
-# Load splits
 ds_cfg = cfg.get("dataset", {})
 train_path = Path(ds_cfg.get("train_path", "data/splits/train_features.csv"))
 val_path = Path(ds_cfg.get("val_path", "data/splits/val_features.csv"))
+
+# Auto-generate splits if missing (e.g. fresh Colab session)
+if not train_path.is_file() or not val_path.is_file():
+    print("Feature splits not detected locally. Generating from pipeline...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+    train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
+    pipeline = FeaturePipeline()
+    pipeline.fit(train_df)
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+    train_path.parent.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(train_path, index=False)
+    val_feats.to_csv(val_path, index=False)
+    test_feats.to_csv(train_path.parent / "test_features.csv", index=False)
 
 # Verify A10.1 strict test split isolation
 validate_split_paths(train_path, val_path)
@@ -143,17 +192,25 @@ print(f"PASS: A10.1 Chronological Split Invariants Verified.")
 print(f"Train Period: {split_info['train_start']} to {split_info['train_end']} ({split_info['train_rows']:,} rows)")
 print(f"Val Period:   {split_info['val_start']} to {split_info['val_end']} ({split_info['val_rows']:,} rows)")
 
-# Load events and incidents for attribution ablation (Arm 5)
+# Load or generate operational events & incidents for Arm 5
 events_path = Path(ds_cfg.get("val_events_path", ""))
 labels_path = Path(ds_cfg.get("val_labels_path", ""))
 events = []
 incidents = []
-if events_path.is_file():
+if events_path.is_file() and labels_path.is_file():
     with open(events_path, "r", encoding="utf-8") as f:
         events = json.load(f)
-if labels_path.is_file():
     with open(labels_path, "r", encoding="utf-8") as f:
         incidents = json.load(f)
+else:
+    print("Generating calibrated validation incidents and operational events for Arm 5...")
+    injector = SyntheticInjector(seed=42, injection_rate=0.03)
+    _, incidents, events = injector.inject(
+        df_val,
+        cost_col=target_col,
+        service_col=service_col,
+        time_col=time_col,
+    )
 
 print(f"Loaded {len(events)} operational events and {len(incidents)} validation incidents.")
 
@@ -161,6 +218,12 @@ print(f"Loaded {len(events)} operational events and {len(incidents)} validation 
 # ## 5. Execute 7 Controlled Experimental Arms
 
 # %%
+import os
+import sys
+
+if os.path.exists("src") and os.path.abspath("src") not in sys.path:
+    sys.path.insert(0, os.path.abspath("src"))
+
 runner = AblationRunner(config=cfg, protocol_path=protocol_path)
 
 print("\n" + "=" * 80)
@@ -206,7 +269,7 @@ print(f"Rolling Threshold FPR:     {arm4['detection']['champion_rolling_threshol
 
 print("\n--- Arm 5: Attribution With vs Without Event Telemetry ---")
 arm5 = arms["arm_5"]
-if arm5.get("total_incidents", 0) > 0:
+if arm5.get("total_incidents", 0) > 0 and "uninformed_without_events" in arm5:
     uninf = arm5["uninformed_without_events"]
     inf = arm5["informed_with_events"]
     print(f"Random Uniform Top-1:      {uninf['random_uniform']['mean_top1'] * 100:.1f}% (Top-3: {uninf['random_uniform']['mean_top3'] * 100:.1f}%)")
@@ -268,18 +331,16 @@ axes[0].set_title("Feature & Architecture Ablation (Lower is Better)", fontsize=
 for bar, val in zip(bars, wapes):
     axes[0].text(bar.get_x() + bar.get_width() / 2, val + 1.5, f"{val:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
 
-# Subplot 2: Temporal Horizon Generalization & Regime Robustness
-regimes = ["Early Val (Days 16-20)", "Late Val (Days 20-24)", "Peak Hours FPR", "Off-Peak FPR"]
+# Subplot 2: Temporal Horizon Generalization
+regimes = ["Early Val (Days 16-20)", "Late Val (Days 20-24)"]
 vals = [
     arm6["early_val_window"]["mean_wape"],
     arm6["late_val_window"]["mean_wape"],
-    arm7["regimes"]["peak_business_hours"]["fpr"] * 100,
-    arm7["regimes"]["off_peak_and_weekend"]["fpr"] * 100,
 ]
-bar2 = axes[1].bar(regimes[:2], vals[:2], color="#4A90E2", alpha=0.8, edgecolor="black", label="WAPE (%)")
+bar2 = axes[1].bar(regimes, vals, color="#4A90E2", alpha=0.8, edgecolor="black")
 axes[1].set_ylabel("WAPE (%)", color="#1B365D", fontsize=11, fontweight="bold")
-axes[1].set_title("Temporal Generalization (Days 16-20 vs 20-24)", fontsize=13, fontweight="bold")
-for b, v in zip(bar2, vals[:2]):
+axes[1].set_title("Temporal Generalization (Early vs Late Window)", fontsize=13, fontweight="bold")
+for b, v in zip(bar2, vals):
     axes[1].text(b.get_x() + b.get_width() / 2, v + 1.0, f"{v:.1f}%", ha="center", va="bottom", fontsize=10, fontweight="bold")
 
 plt.tight_layout()

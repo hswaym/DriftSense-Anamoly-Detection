@@ -49,15 +49,12 @@ SYNTHETIC_EVENT_CIRCULARITY_CAVEAT = (
 
 
 def hash_file_sha256(filepath: str | Path) -> str:
-    """Compute SHA-256 hex digest of a file."""
+    """Compute SHA-256 hex digest of a file with cross-platform newline normalization."""
     path = Path(filepath)
     if not path.is_file():
         raise FileNotFoundError(f"File not found for hashing: {filepath}")
-    sha256 = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(65536):
-            sha256.update(chunk)
-    return sha256.hexdigest()
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def validate_split_paths(train_path: str | Path, val_path: str | Path) -> None:
