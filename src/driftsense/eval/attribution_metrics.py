@@ -117,6 +117,10 @@ def taxonomy_confusion_matrix(
     }
 
 
+# Convenience alias
+compute_taxonomy_confusion_matrix = taxonomy_confusion_matrix
+
+
 def evaluate_attribution_suite(
     y_true_primary: list[str],
     ranked_predictions: list[list[str]],
@@ -128,6 +132,16 @@ def evaluate_attribution_suite(
     top2 = top_k_accuracy(y_true_primary, ranked_predictions, k=2)
     top3 = top_k_accuracy(y_true_primary, ranked_predictions, k=3)
 
+    # Mean Reciprocal Rank (MRR)
+    reciprocal_ranks = []
+    for true_c, preds in zip(y_true_primary, ranked_predictions):
+        if true_c in preds:
+            rank = preds.index(true_c) + 1
+            reciprocal_ranks.append(1.0 / rank)
+        else:
+            reciprocal_ranks.append(0.0)
+    mrr = float(np.mean(reciprocal_ranks)) if len(reciprocal_ranks) > 0 else 0.0
+
     pred_top1 = [p[0] if len(p) > 0 else "UNKNOWN" for p in ranked_predictions]
     cm = taxonomy_confusion_matrix(y_true_primary, pred_top1, classes=classes)
 
@@ -135,6 +149,7 @@ def evaluate_attribution_suite(
         "top_1_accuracy": top1,
         "top_2_accuracy": top2,
         "top_3_accuracy": top3,
+        "mrr": mrr,
         "total_evaluated_incidents": len(y_true_primary),
         "confusion_matrix": cm,
     }
