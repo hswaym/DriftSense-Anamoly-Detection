@@ -158,8 +158,16 @@ class ManifestBuilder:
         return output_file
 
 
-def verify_manifest(manifest_path_or_dir: str | Path) -> tuple[bool, list[str]]:
+def verify_manifest(
+    manifest_path_or_dir: str | Path, require_datasets: bool = False
+) -> tuple[bool, list[str]]:
     """Recomputes every hash and verifies artifacts in manifest.json.
+
+    Args:
+        manifest_path_or_dir: Directory containing manifest.json or path to manifest file.
+        require_datasets: If True, requires all dataset files to be locally present.
+                          If False (default for Colab runs), verifies dataset hashes only if
+                          the dataset files are present locally.
 
     Returns:
         tuple[bool, list[str]]: (is_valid, list of error messages)
@@ -222,10 +230,12 @@ def verify_manifest(manifest_path_or_dir: str | Path) -> tuple[bool, list[str]]:
             rel_path = manifest_file.parent / ds_path.name
             if rel_path.is_file():
                 ds_path = rel_path
-            else:
+            elif require_datasets:
                 errors.append(
                     f"Dataset file recorded in manifest not found: {ds_path_str}"
                 )
+                continue
+            else:
                 continue
 
         actual_ds_sha = compute_file_sha256(ds_path)

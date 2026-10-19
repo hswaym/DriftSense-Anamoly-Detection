@@ -113,7 +113,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_verify_manifest(args: argparse.Namespace) -> int:
     """Recompute hashes and verify manifest.json."""
     manifest_target = args.target or "."
-    is_valid, errors = verify_manifest(manifest_target)
+    is_valid, errors = verify_manifest(
+        manifest_target, require_datasets=args.require_datasets
+    )
     if is_valid:
         print(f"PASS: Manifest verified successfully at '{manifest_target}'.")
         return 0
@@ -173,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default=".",
         help="Directory containing manifest.json or path to manifest",
+    )
+    p_vm.add_argument(
+        "--require-datasets",
+        action="store_true",
+        help="Require dataset files to be present locally for hash verification",
     )
     p_vm.set_defaults(func=cmd_verify_manifest)
 
