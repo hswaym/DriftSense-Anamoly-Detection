@@ -156,5 +156,30 @@ This log records binding architectural decisions, context, rationale, and conseq
   - **Traceability**: Synchronized `docs/traceability_matrix.md` with verified evidence across all completed phases.
 - **Consequences**: Clears all acceptance criteria for Phase 12 (A12.1, A12.2, A12.3, A12.4, A12.5). Unblocks Phase 13 (Final Evaluation on Quarantined Test Horizon).
 
+---
+
+### DEC-016: Final Evaluation Benchmark on Locked Test Partition ($D_{\text{test}}$)
+- **Status**: **ACCEPTED**
+- **Date**: 2026-10-21
+- **Context**: Phase 13 executes the final benchmark evaluation strictly once on the unseen chronological test partition ($D_{\text{test}}$, Days 25–30, 2024-09-25 00:00:00 to 2024-09-30 23:00:00 UTC, 3,822 records) under the locked protocol defined in `docs/final_results_protocol.md`. Governed by A13.1 (Cryptographic SHA-256 Hash Guard across all 8 configuration files), A13.2 (One-Time Execution Invariant; zero retuning or post-hoc threshold adjustment allowed), and A13.3 (Model and threshold freezing from Phase 12).
+- **Decision**: Accepted final test horizon evaluation results (Run `run_20261020_183410_6f5272`, commit `2d9a0c3`, manifest signed with `test_evaluated: true`):
+  1. **Forecasting Benchmark ($D_{\text{test}}$)**:
+     - Seasonal Naive ($s=24$): WAPE = 129.18%, RMSE = $0.1833, MASE = 1.2381
+     - Moving Average ($w=24$): WAPE = 150.32%, RMSE = $0.1760, MASE = 1.4407
+     - Exponential Smoothing ($\alpha=0.25$): WAPE = 144.24%, RMSE = $0.1767, MASE = 1.3825
+     - **Champion XGBoost Forecaster (3 random seeds `[42, 123, 999]`)**: WAPE = **82.03% ± 1.52%**, RMSE = **$0.1376 ± $0.0025**, MASE = **0.7862 ± 0.0145** (MASE < 1 confirms beating naive persistence by 21.4% on unseen future horizon).
+  2. **Dual-Track Anomaly Detection ($D_{\text{test}}$)**:
+     - **Real Clean Track**: Overall False Positive Rate = **0.16%** (6 false alarms out of 3,822 hourly records), Weekday FPR = 0.15%, Weekend FPR = 0.16% (clearing $\le 1.0\%$ operational alarm fatigue threshold).
+     - **Synthetic Ground Truth Track**: Point-Precision = 96.03%, Point-Recall = 63.68%, Point-F1 = **0.7658**, Event-Precision = 90.00%, Event-Recall = **95.74% (45/47 events detected)**, Event-F1 = **0.9278**, Mean Detection Delay = **0.00 hours** (instantaneous detection upon onset).
+  3. **Operational Root-Cause Attribution ($D_{\text{test}}$)**:
+     - Random Baseline: Top-1 = 4.26%, Top-2 = 23.40%, Top-3 = 42.55%, MRR = 0.3099
+     - Class Prior Baseline: Top-1 = 27.66%, Top-2 = 53.19%, Top-3 = 76.60%, MRR = 0.4908
+     - **Champion Temporal Correlation Attributor ($lookback=6\text{h}, decay=2\text{h}$)**: Top-1 Accuracy = **97.87% (46/47 incidents)**, Top-2 Accuracy = **100.0%**, Top-3 Accuracy = **100.0%**, MRR = **0.9894**.
+  4. **Model Explainability & Governance ($D_{\text{test}}$)**:
+     - Exact TreeSHAP additivity verified ($\sum \phi_i + \phi_0 = f(x)$, max residual error $< 0.002$).
+     - Top global cost drivers: `BilledCost` (48.18%), `ConsumedQuantity` (8.46%), `day_of_month` (3.71%), `EffectiveCost_roll_mean_168h` (3.70%), `EffectiveCost_roll_max_24h` (3.12%).
+     - All executive audit narratives generated with strict non-causal terminology ("likely associated causes", "model evidence").
+- **Consequences**: Clears all acceptance criteria for Phase 13 (A13.1, A13.2, A13.3). Final benchmark values frozen into project history. Unblocks Phase 14 (Final Report and Presentation Delivery).
+
 
 
