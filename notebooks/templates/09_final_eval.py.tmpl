@@ -1,0 +1,375 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 09: Final Test Horizon Evaluation (Phase 13)
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~3-5 minutes  
+# **RAM Needed:** ~2-4 GB  
+# **Disk Needed:** ~1 GB  
+# **Expected Outputs:**  
+# - Final Test Metrics JSON: `runs/<run_id>/final_test_results.json`  
+# - Test Predictions & Alerts CSV: `runs/<run_id>/test_forecast_and_alerts.csv`  
+# - Test TreeSHAP Feature Ranking CSV: `runs/<run_id>/test_shap_importance.csv`  
+# - Executive Audit Narratives: `runs/<run_id>/test_audit_narratives.md`  
+# - Final Benchmark Visualization: `runs/<run_id>/final_test_benchmark.png`  
+# - Cryptographically Signed Manifest: `runs/<run_id>/manifest.json` with `test_evaluated: true`  
+#
+# > **CRITICAL EVALUATION & LOCKED PROTOCOL INVARIANTS (G6, A13.1, A13.2, A13.3):**  
+# > - **A13.1 Cryptographic Hash Guard:** All pipeline configurations are verified against frozen SHA-256 hashes before execution begins.  
+# > - **A13.2 One-Time Execution Invariant:** The unseen test partition ($D_{\text{test}}$, Days 25–30) is evaluated strictly once. Re-tuning after seeing test set results is strictly forbidden.  
+# > - **A13.3 Model & Threshold Freezing:** All champion models and detection thresholds are frozen from Phase 12. Zero parameter search or calibration occurs on $D_{\text{test}}$.  
+# > - **Non-Causal Association:** All operational attribution is framed as probabilistic evidence ("likely associated causes"), avoiding false causal claims.
+
+# %% [markdown]
+# ## 1. Setup, Environment & Accelerator Check
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Self-healing repository location check
+if os.path.exists("repo/src/driftsense"):
+    os.chdir("repo")
+
+# Clone repository if running on a fresh Colab instance
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo/src/driftsense"):
+        os.chdir("repo")
+    else:
+        print("Cloning DriftSense repository in Colab...")
+        subprocess.run(
+            ["git", "clone", "https://github.com/hswaym/DriftSense-Anamoly-Detection.git", "repo"],
+            check=True,
+        )
+        os.chdir("repo")
+
+# Pull latest commits
+subprocess.run(["git", "pull", "origin", "main"], check=False)
+
+# Ensure local source tree is in python sys.path
+sys.path.insert(0, os.path.abspath("src"))
+sys.path.insert(0, os.path.abspath("."))
+
+# Install dependencies if in Colab
+try:
+    import google.colab  # noqa: F401
+    print("Running in Google Colab environment. Installing requirements...")
+    subprocess.run(["pip", "install", "-r", "requirements-colab.txt"], check=True)
+    subprocess.run(["pip", "install", "-e", "."], check=True)
+except ImportError:
+    print("Running in standard local / virtual environment.")
+
+# Hardware check
+from driftsense.runtime.hardware import check_hardware
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic ===")
+print(f"Platform: {hw['platform']}, CPU: {hw['cpu']}, RAM: {hw['ram_gb']:.1f} GB")
+
+# %% [markdown]
+# ## 2. Cryptographic Hash Guard Verification (A13.1)
+#
+# Enforces that all 8 configuration files match their frozen SHA-256 digests in `docs/final_results_protocol.md`.
+
+# %%
+from driftsense.eval.final import FROZEN_CONFIG_HASHES, assert_config_hashes_frozen, verify_config_hashes
+
+print("=== Enforcing A13.1 Cryptographic Hash Guard ===")
+is_valid, errors = verify_config_hashes()
+if not is_valid:
+    print("FAIL: Hash guard violation! Config files have been modified from frozen protocol:")
+    for err in errors:
+        print(f"  - {err}")
+    raise RuntimeError("A13.1 Violation: Cannot evaluate test set with modified configurations.")
+else:
+    print("PASS: A13.1 Hash Guard Verified. All 8 configuration digests match frozen protocol byte-for-byte:")
+    for rel_path, expected_hash in FROZEN_CONFIG_HASHES.items():
+        print(f"  [OK] {rel_path:<30} -> {expected_hash[:16]}...")
+
+# %% [markdown]
+# ## 3. Ingestion of Training ($D_{\text{train}}$) and Unseen Test ($D_{\text{test}}$) Splits
+#
+# - $D_{\text{train}}$: Days 1–15 (historical baselines)
+# - $D_{\text{test}}$: Days 25–30 (unseen future horizon)
+
+# %%
+import pandas as pd
+from datetime import datetime, timezone
+
+train_path = Path("data/splits/train_features.csv")
+test_path = Path("data/splits/test_features.csv")
+
+if not train_path.is_file() or not test_path.is_file():
+    print("Splits not found locally. Running feature pipeline...")
+    subprocess.run(["driftsense", "clean", "--config", "configs/clean_focus.yaml"], check=True)
+    subprocess.run(["driftsense", "features", "--config", "configs/features_focus.yaml"], check=True)
+
+df_train = pd.read_csv(train_path, low_memory=False)
+df_test = pd.read_csv(test_path, low_memory=False)
+
+print("=== Partition Summary ===")
+print(f"Train Slice (D_train): {len(df_train):,} rows ({df_train['ChargePeriodStart'].min()} -> {df_train['ChargePeriodStart'].max()})")
+print(f"Test Slice  (D_test):  {len(df_test):,} rows ({df_test['ChargePeriodStart'].min()} -> {df_test['ChargePeriodStart'].max()})")
+
+# Initialize Run Directory
+run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}"
+run_dir = Path(f"runs/{run_id}")
+run_dir.mkdir(parents=True, exist_ok=True)
+print(f"Allocated Phase 13 Run Directory: {run_dir}")
+
+# %% [markdown]
+# ## 4. Execution of Final Locked Evaluation Pipeline
+#
+# Evaluates:
+# 1. Expected Cost Forecaster (Champion XGBoost vs Baselines across 3 seeds)
+# 2. Anomaly Detection (Clean Track FPR vs Synthetic Track Event-F1)
+# 3. Root-Cause Attribution (Temporal Correlation vs Baselines)
+# 4. TreeSHAP Explainability (Additivity verification & Audit Narratives)
+
+# %%
+from driftsense.eval.final import evaluate_final_test_set
+
+final_results = evaluate_final_test_set(
+    df_train=df_train,
+    df_test=df_test,
+    output_dir=run_dir,
+    target_col="EffectiveCost",
+    service_col="ServiceName",
+    time_col="ChargePeriodStart",
+    usage_col="ConsumedQuantity",
+    seeds=[42, 123, 999],
+    atol_shap=0.002,
+    allow_override=True,  # Permit initial evaluation in newly allocated run_dir
+    verify_hashes=True,
+)
+print("Locked test set evaluation finished successfully.")
+
+# %% [markdown]
+# ## 5. Final Results Presentation & Summary Tables
+
+# %%
+# 1. Forecasting Benchmark Table
+print("\n" + "=" * 90)
+print("1. EXPECTED-COST FORECASTING ON TEST HORIZON (D_test, Days 25-30)")
+print("=" * 90)
+fc_data = final_results["forecast"]
+
+rows_fc = [
+    {
+        "Model": "Seasonal Naive (s=24)",
+        "WAPE (%)": f"{fc_data['seasonal_naive']['wape'] * 100:.2f}%",
+        "MAE ($)": f"${fc_data['seasonal_naive']['mae']:.4f}",
+        "RMSE ($)": f"${fc_data['seasonal_naive']['rmse']:.4f}",
+        "MASE": f"{fc_data['seasonal_naive']['mase']:.4f}",
+    },
+    {
+        "Model": "Moving Average (w=24)",
+        "WAPE (%)": f"{fc_data['moving_average']['wape'] * 100:.2f}%",
+        "MAE ($)": f"${fc_data['moving_average']['mae']:.4f}",
+        "RMSE ($)": f"${fc_data['moving_average']['rmse']:.4f}",
+        "MASE": f"{fc_data['moving_average']['mase']:.4f}",
+    },
+    {
+        "Model": "Exponential Smoothing (alpha=0.25)",
+        "WAPE (%)": f"{fc_data['exponential_smoothing']['wape'] * 100:.2f}%",
+        "MAE ($)": f"${fc_data['exponential_smoothing']['mae']:.4f}",
+        "RMSE ($)": f"${fc_data['exponential_smoothing']['rmse']:.4f}",
+        "MASE": f"{fc_data['exponential_smoothing']['mase']:.4f}",
+    },
+    {
+        "Model": "XGBoost Champion (3 seeds)",
+        "WAPE (%)": f"{fc_data['xgboost_champion']['wape_mean'] * 100:.2f}% ± {fc_data['xgboost_champion']['wape_std'] * 100:.2f}%",
+        "MAE ($)": f"${fc_data['xgboost_champion']['mae_mean']:.4f} ± ${fc_data['xgboost_champion']['mae_std']:.4f}",
+        "RMSE ($)": f"${fc_data['xgboost_champion']['rmse_mean']:.4f} ± ${fc_data['xgboost_champion']['rmse_std']:.4f}",
+        "MASE": f"{fc_data['xgboost_champion']['mase_mean']:.4f} ± {fc_data['xgboost_champion']['mase_std']:.4f}",
+    },
+]
+display(pd.DataFrame(rows_fc))
+
+# 2. Anomaly Detection Dual-Track Table
+print("\n" + "=" * 90)
+print("2. ANOMALY DETECTION ON TEST HORIZON (D_test)")
+print("=" * 90)
+det_data = final_results["detection"]
+clean_t = det_data["clean_track"]
+synth_t = det_data["synthetic_track"]
+
+rows_det = [
+    {
+        "Track": "Real Clean Track",
+        "Overall FPR": f"{clean_t['fpr_overall'] * 100:.2f}%",
+        "Weekday FPR": f"{clean_t['fpr_weekday'] * 100:.2f}%",
+        "Weekend FPR": f"{clean_t['fpr_weekend'] * 100:.2f}%",
+        "False Alarms": f"{clean_t['false_alarms']}/{clean_t['total_clean_points']}",
+    },
+    {
+        "Track": "Synthetic Ground Truth Track",
+        "Point F1": f"{synth_t['point_f1']:.4f}",
+        "Event F1": f"{synth_t['event_f1']:.4f}",
+        "Event Recall": f"{synth_t['event_recall']:.4f}",
+        "Mean Delay (h)": f"{synth_t['mean_delay_hours']:.2f}h",
+    },
+]
+display(pd.DataFrame(rows_det))
+
+# 3. Root-Cause Attribution Benchmark
+print("\n" + "=" * 90)
+print("3. ROOT-CAUSE ATTRIBUTION ON TEST HORIZON (D_test)")
+print("=" * 90)
+attr_data = final_results["attribution"]
+rows_attr = [
+    {
+        "Attributor": "Random Baseline",
+        "Top-1 Accuracy": f"{attr_data['baseline_random']['top_1_accuracy'] * 100:.1f}%",
+        "Top-2 Accuracy": f"{attr_data['baseline_random']['top_2_accuracy'] * 100:.1f}%",
+        "Top-3 Accuracy": f"{attr_data['baseline_random']['top_3_accuracy'] * 100:.1f}%",
+    },
+    {
+        "Attributor": "Class Prior Baseline",
+        "Top-1 Accuracy": f"{attr_data['baseline_prior']['top_1_accuracy'] * 100:.1f}%",
+        "Top-2 Accuracy": f"{attr_data['baseline_prior']['top_2_accuracy'] * 100:.1f}%",
+        "Top-3 Accuracy": f"{attr_data['baseline_prior']['top_3_accuracy'] * 100:.1f}%",
+    },
+    {
+        "Attributor": "Temporal Correlation Champion",
+        "Top-1 Accuracy": f"{attr_data['champion_correlation']['top_1_accuracy'] * 100:.1f}%",
+        "Top-2 Accuracy": f"{attr_data['champion_correlation']['top_2_accuracy'] * 100:.1f}%",
+        "Top-3 Accuracy": f"{attr_data['champion_correlation']['top_3_accuracy'] * 100:.1f}%",
+    },
+]
+display(pd.DataFrame(rows_attr))
+
+# 4. TreeSHAP Global Drivers
+print("\n" + "=" * 90)
+print("4. TOP-5 GLOBAL COST DRIVERS ON TEST HORIZON (TreeSHAP Additivity Verified)")
+print("=" * 90)
+imp_df = pd.read_csv(run_dir / "test_shap_importance.csv")
+display(imp_df.head(5)[["rank", "feature", "mean_abs_shap", "relative_importance_pct"]])
+
+# %% [markdown]
+# ## 6. Comprehensive Visualization Deliverable
+#
+# Generates publication-ready multi-panel figure saved to `final_test_benchmark.png`.
+
+# %%
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 11))
+fig.suptitle(f"DriftSense Final Evaluation on Unseen Test Horizon (Phase 13)\nRun: {run_id} | FOCUS 1.0/1.3 Benchmark", fontsize=15, weight="bold")
+
+# Panel A: Forecasting Model Comparison
+ax1 = axes[0, 0]
+models = ["Seasonal Naive", "Moving Avg", "Exp Smoothing", "Champion XGBoost"]
+wapes = [
+    fc_data["seasonal_naive"]["wape"] * 100,
+    fc_data["moving_average"]["wape"] * 100,
+    fc_data["exponential_smoothing"]["wape"] * 100,
+    fc_data["xgboost_champion"]["wape_mean"] * 100,
+]
+colors = ["#7f7f7f", "#bcbd22", "#17becf", "#1f77b4"]
+bars = ax1.bar(models, wapes, color=colors, edgecolor="black", alpha=0.85)
+ax1.set_title("A. Forecasting Error on Test Partition (WAPE %)", weight="bold")
+ax1.set_ylabel("WAPE (%) — Lower is Better")
+ax1.grid(axis="y", linestyle="--", alpha=0.5)
+for bar in bars:
+    yval = bar.get_height()
+    ax1.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.0, f"{yval:.1f}%", ha="center", va="bottom", weight="bold")
+
+# Panel B: Detection Dual-Track
+ax2 = axes[0, 1]
+det_labels = ["Clean Overall FPR", "Clean Weekend FPR", "Synthetic Point-F1", "Synthetic Event-F1"]
+det_vals = [
+    clean_t["fpr_overall"] * 100,
+    clean_t["fpr_weekend"] * 100,
+    synth_t["point_f1"] * 100,
+    synth_t["event_f1"] * 100,
+]
+det_colors = ["#2ca02c", "#98df8a", "#ff7f0e", "#d62728"]
+bars2 = ax2.bar(det_labels, det_vals, color=det_colors, edgecolor="black", alpha=0.85)
+ax2.set_title("B. Anomaly Detection Performance on Test Horizon", weight="bold")
+ax2.set_ylabel("Percentage (%)")
+ax2.grid(axis="y", linestyle="--", alpha=0.5)
+for bar in bars2:
+    yval = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.0, f"{yval:.1f}%", ha="center", va="bottom", weight="bold")
+
+# Panel C: Root-Cause Attribution Accuracy
+ax3 = axes[1, 0]
+attr_models = ["Random Baseline", "Class Prior", "Temporal Correlation"]
+top1_acc = [
+    attr_data["baseline_random"]["top_1_accuracy"] * 100,
+    attr_data["baseline_prior"]["top_1_accuracy"] * 100,
+    attr_data["champion_correlation"]["top_1_accuracy"] * 100,
+]
+top3_acc = [
+    attr_data["baseline_random"]["top_3_accuracy"] * 100,
+    attr_data["baseline_prior"]["top_3_accuracy"] * 100,
+    attr_data["champion_correlation"]["top_3_accuracy"] * 100,
+]
+x = np.arange(len(attr_models))
+width = 0.35
+ax3.bar(x - width/2, top1_acc, width, label="Top-1 Accuracy", color="#3b82f6", edgecolor="black")
+ax3.bar(x + width/2, top3_acc, width, label="Top-3 Accuracy", color="#93c5fd", edgecolor="black")
+ax3.set_title("C. Root-Cause Attribution Accuracy on Test Incidents", weight="bold")
+ax3.set_xticks(x)
+ax3.set_xticklabels(attr_models)
+ax3.set_ylabel("Accuracy (%)")
+ax3.legend()
+ax3.grid(axis="y", linestyle="--", alpha=0.5)
+
+# Panel D: Top-5 Global TreeSHAP Drivers
+ax4 = axes[1, 1]
+top_5 = imp_df.head(5).iloc[::-1]
+ax4.barh(top_5["feature"], top_5["relative_importance_pct"], color="#8b5cf6", edgecolor="black", alpha=0.85)
+ax4.set_title("D. Top-5 Global Cost Drivers on Test Horizon (TreeSHAP %)", weight="bold")
+ax4.set_xlabel("Relative Importance (%)")
+ax4.grid(axis="x", linestyle="--", alpha=0.5)
+for i, v in enumerate(top_5["relative_importance_pct"]):
+    ax4.text(v + 0.5, i, f"{v:.1f}%", va="center", weight="bold")
+
+plt.tight_layout()
+fig_out = run_dir / "final_test_benchmark.png"
+plt.savefig(fig_out, dpi=300)
+plt.show()
+print(f"Saved final visual deliverable to: {fig_out}")
+
+# %% [markdown]
+# ## 7. Manifest Verification & Phase 13 Completion Evidence
+
+# %%
+import json
+from pathlib import Path
+from driftsense.runtime.manifest import verify_manifest
+
+manifest_path = run_dir / "manifest.json"
+with open(manifest_path, "r", encoding="utf-8") as f:
+    mf = json.load(f)
+
+# Re-verify manifest
+is_valid, mf_errors = verify_manifest(run_dir, require_datasets=False)
+if is_valid:
+    print(f"PASS: Run manifest cryptographically verified at {run_dir} (Exit code 0)")
+    print(f"Test Evaluated Marker: {mf.get('test_evaluated')}")
+else:
+    print(f"FAIL: Manifest verification error: {mf_errors}")
+
+# Print Executive Audit Narratives
+print("\n" + "=" * 90)
+print("EXECUTIVE FINOPS AUDIT NARRATIVES (Strictly Non-Causal Phrasing)")
+print("=" * 90)
+with open(run_dir / "test_audit_narratives.md", "r", encoding="utf-8") as f:
+    print(f.read())
