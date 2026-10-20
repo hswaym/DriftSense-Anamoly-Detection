@@ -108,14 +108,50 @@ else:
 # %%
 import pandas as pd
 from datetime import datetime, timezone
+from pathlib import Path
+from driftsense.runtime.config import load_config
+from driftsense.data.acquire import acquire_dataset
+from driftsense.data.clean import clean_focus_data
+from driftsense.data.aggregate import aggregate_to_canonical_grain
+from driftsense.eval.splits import chronological_split
+from driftsense.features.builder import FeaturePipeline
 
 train_path = Path("data/splits/train_features.csv")
 test_path = Path("data/splits/test_features.csv")
 
 if not train_path.is_file() or not test_path.is_file():
-    print("Splits not found locally. Running feature pipeline...")
-    subprocess.run(["driftsense", "clean", "--config", "configs/clean_focus.yaml"], check=True)
-    subprocess.run(["driftsense", "features", "--config", "configs/features_focus.yaml"], check=True)
+    print("Splits not found locally. Running self-contained acquisition and feature pipeline...")
+    raw_path = Path("data/raw/focus_sample_10000.csv")
+    if not raw_path.is_file():
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        d_cfg, _ = load_config("configs/data_focus.yaml")
+        print("Acquiring raw dataset...")
+        acquire_dataset(
+            url=d_cfg["dataset"]["url"],
+            destination=str(raw_path),
+            expected_sha256=d_cfg["dataset"]["sha256"],
+            overwrite=False,
+        )
+    print("Cleaning and aggregating dataset to 1h canonical grain...")
+    df_raw = pd.read_csv(raw_path, low_memory=False)
+    df_clean, _ = clean_focus_data(df_raw)
+    df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
+
+    print("Splitting chronologically (train/val/test)...")
+    train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
+
+    print("Fitting FeaturePipeline on train split and transforming all partitions...")
+    pipeline = FeaturePipeline()
+    pipeline.fit(train_df)
+    train_feats = pipeline.transform(train_df)
+    val_feats = pipeline.transform(val_df)
+    test_feats = pipeline.transform(test_df)
+
+    train_path.parent.mkdir(parents=True, exist_ok=True)
+    train_feats.to_csv(train_path, index=False)
+    val_feats.to_csv(train_path.parent / "val_features.csv", index=False)
+    test_feats.to_csv(test_path, index=False)
+    print("Feature splits written successfully to data/splits/.")
 
 df_train = pd.read_csv(train_path, low_memory=False)
 df_test = pd.read_csv(test_path, low_memory=False)
