@@ -40,36 +40,38 @@ import sys
 import subprocess
 from pathlib import Path
 
-# Self-healing repository location check
-if os.path.exists("repo/src/driftsense"):
-    os.chdir("repo")
+# Pinned repository commit SHA or branch for reproducibility
+PINNED_COMMIT_SHA = "v2-enterprise"
+REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
 # Clone repository if running on a fresh Colab instance
 if not os.path.exists("src/driftsense"):
-    if os.path.exists("repo/src/driftsense"):
+    if os.path.exists("repo"):
         os.chdir("repo")
     else:
         print("Cloning DriftSense repository in Colab...")
         subprocess.run(
-            ["git", "clone", "https://github.com/hswaym/DriftSense-Anamoly-Detection.git", "repo"],
+            ["git", "clone", "-b", PINNED_COMMIT_SHA, REPO_URL, "repo"],
             check=True,
         )
         os.chdir("repo")
-
-# Pull latest commits
-subprocess.run(["git", "pull", "origin", "main"], check=False)
+else:
+    subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=False)
+    subprocess.run(["git", "pull", "origin", PINNED_COMMIT_SHA], check=False)
 
 # Install driftsense in editable mode
 print("Installing driftsense package...")
 subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+if os.path.exists("requirements-colab.txt"):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
 
 # Defensive path insertion for active Colab kernel
-for candidate in ["src", "repo/src", os.path.abspath("src")]:
-    if os.path.exists(candidate) and os.path.abspath(candidate) not in sys.path:
-        sys.path.insert(0, os.path.abspath(candidate))
+src_dir = os.path.abspath("src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
 print(f"Environment ready. Current working directory: {os.getcwd()}")
-print(f"sys.path: {sys.path[:3]}")
+print(f"Added {src_dir} to sys.path.")
 
 # %% [markdown]
 # ## 2. Hardware Diagnostics
