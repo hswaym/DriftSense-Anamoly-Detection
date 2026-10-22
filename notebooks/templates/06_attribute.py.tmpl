@@ -257,7 +257,7 @@ for i, model in enumerate(attributors, 1):
     top3_preds_by_model[model.name] = top3_preds
 
     metrics = evaluate_attribution_suite(y_true_val, top3_preds)
-    conf_mat = compute_taxonomy_confusion_matrix(y_true_val, top3_preds)
+    conf_mat = compute_taxonomy_confusion_matrix(y_true_val, [p[0] if p else "" for p in top3_preds])
 
     results[model.name] = {
         "metrics": metrics,

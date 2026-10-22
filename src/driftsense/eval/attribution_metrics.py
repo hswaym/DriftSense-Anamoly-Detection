@@ -223,13 +223,19 @@ def taxonomy_confusion_matrix(
     classes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compute confusion matrix across cause taxonomy classes."""
+    # If passed top-k ranked predictions, extract top-1
+    if y_pred_top1 and isinstance(y_pred_top1[0], (list, tuple)):
+        top1_flat = [p[0] if len(p) > 0 else "" for p in y_pred_top1]
+    else:
+        top1_flat = list(y_pred_top1)
+
     if classes is None:
-        classes = sorted(set(y_true) | set(y_pred_top1))
+        classes = sorted(set(y_true) | set(top1_flat))
 
     idx_map = {c: i for i, c in enumerate(classes)}
     matrix = np.zeros((len(classes), len(classes)), dtype=int)
 
-    for yt, yp in zip(y_true, y_pred_top1):
+    for yt, yp in zip(y_true, top1_flat):
         if yt in idx_map and yp in idx_map:
             matrix[idx_map[yt], idx_map[yp]] += 1
 
