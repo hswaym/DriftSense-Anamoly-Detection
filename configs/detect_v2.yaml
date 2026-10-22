@@ -1,0 +1,90 @@
+# DriftSense v2 — Anomaly Detection Configuration (Phase 7)
+# Governed by Rule C3, C6, C7, and Phase 7 Acceptance Criteria
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Rule C7: Holdout partition (data/splits/test_features.csv) is strictly quarantined
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+  actual_col: "EffectiveCost"
+  expected_col: "EffectiveCost_expected"
+  upper_bound_col: "EffectiveCost_upper_bound"
+
+detectors:
+  conformal_interval:
+    enabled: true
+    sensitivity: "Balanced"
+    presets:
+      Low:
+        k: 3
+        n: 4
+        min_dollar_exceedance: 50.0
+        min_pct_exceedance: 30.0
+      Balanced:
+        k: 2
+        n: 3
+        min_dollar_exceedance: 20.0
+        min_pct_exceedance: 15.0
+      High:
+        k: 1
+        n: 2
+        min_dollar_exceedance: 5.0
+        min_pct_exceedance: 10.0
+  level_shift:
+    enabled: true
+    window: 12
+    threshold: 3.5
+  rolling_threshold:
+    enabled: true
+    window: 24
+    threshold: 3.0
+  zscore:
+    enabled: true
+    threshold: 3.0
+  iforest:
+    enabled: true
+    n_estimators: 100
+    contamination: 0.03
+    threshold: 0.55
+  ocsvm:
+    enabled: true
+    kernel: "rbf"
+    nu: 0.03
+
+severity:
+  weight_dollar: 0.45
+  weight_pct: 0.30
+  weight_duration: 0.25
+  tiers:
+    Info: [0.0, 25.0]
+    Low: [25.0, 50.0]
+    Medium: [50.0, 75.0]
+    High: [75.0, 100.0]
+
+evaluation:
+  primary_metric: "event_f1"
+  tracked_metrics:
+    - "point_precision"
+    - "point_recall"
+    - "point_f1"
+    - "event_precision"
+    - "event_recall"
+    - "event_f1"
+    - "pr_auc"
+    - "mean_delay_hours"
+    - "alerts_per_week"
+    - "alerts_per_spend"
+    - "presumed_normal_alert_rate"
+
+output:
+  detectors_dir: "models/detect"
+  metrics_path: "metrics/val_detect_metrics_v2.json"
+  val_detections_path: "data/predictions/val_detections_v2.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_7"
+  stage: "detection"
+  holdout_touched: false

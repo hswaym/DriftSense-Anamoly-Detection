@@ -1,0 +1,26 @@
+# DriftSense v2 — Scenario Generator Configuration: Quarantined Holdout Split (Leave-Family-Out)
+
+scenario:
+  name: "holdout_quarantined_suite"
+  is_holdout: true
+  seeds: [707, 808, 909, 1010, 1111]
+  min_faults_per_service: 2
+  max_faults_per_service: 4
+  decoy_to_fault_ratio: 3.5
+  magnitude_range: [1.15, 4.00]
+  duration_range_hours: [4, 16]
+
+  # Holdout-Reserved Partition (5 families strictly reserved for holdout)
+  allowed_fault_families:
+    - "level_shift"
+    - "region_migration"
+    - "untagged_spend_growth"
+    - "commitment_discount_expiry"
+    - "credit_refund_artifact"
+
+io:
+  clean_input_path: "data/raw/focus_sample_10000.csv"
+  output_billing_path: "data/scenarios/holdout_billing.csv"
+  output_events_path: "data/scenarios/holdout_events.csv"
+  output_labels_path: "data/scenarios/holdout_labels.csv"
+  calibration_profile_path: "data/scenarios/holdout_calibration_profile.json"

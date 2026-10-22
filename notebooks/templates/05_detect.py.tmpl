@@ -12,25 +12,24 @@
 # ---
 
 # %% [markdown]
-# # DriftSense — 05: Anomaly Detection Engine & Calibration
+# # DriftSense — 05: Anomaly Detection Engine, Materiality & Severity (v2)
 #
 # **Runtime Type:** Python 3 (CPU or GPU)  
 # **Estimated Runtime:** ~1-3 minutes  
 # **RAM Needed:** ~2-4 GB  
 # **Disk Needed:** ~1 GB  
 # **Expected Outputs:**  
-# - Detector Checkpoints: `runs/<run_id>/models/{zscore,rolling_threshold,iforest,ocsvm}.joblib`  
-# - Validation Detections Matrix: `runs/<run_id>/val_detections.csv`  
-# - Validation Detection Metrics Report: `runs/<run_id>/val_detect_metrics.json`  
-# - Synthetic Ground-Truth Labels (Contract 6): `runs/<run_id>/val_anomaly_labels.json`  
-# - Operational Events Table (Contract 5): `runs/<run_id>/val_operational_events.json`  
-# - Detection Visualizations: `runs/<run_id>/detection_comparison.png`  
+# - Detector Checkpoints: `runs/<run_id>/models/{conformal_interval,level_shift,rolling_threshold,zscore,iforest,ocsvm}.joblib`  
+# - Validation Detections Matrix: `runs/<run_id>/val_detections_v2.csv`  
+# - Validation Detection Metrics Report: `runs/<run_id>/val_detect_metrics_v2.json`  
+# - Severity-Scored Incidents Table: `runs/<run_id>/val_severity_incidents.csv`  
+# - Detection Visualizations: `runs/<run_id>/detection_comparison_v2.png`  
 # - Cryptographically Verified Manifest: `runs/<run_id>/manifest.json`  
 #
-# > **CRITICAL EVALUATION & ISOLATION INVARIANTS (G6 & A7.3):**  
-# > - **Independent Ground Truth (Contract 9):** Anomaly ground truth is established independently via Contract 6 and Contract 9, never inferred from detector output.  
-# > - **Dual Track Separation:** Results are partitioned into Real Data Track (evaluating false positive rates across normal diurnal and weekend regimes) and Synthetic Track (evaluating Precision, Recall, Event-F1, and temporal detection delay).  
-# > - **A7.3 Test Quarantine:** The test partition ($D_{\text{test}}$, Days 25–30) is strictly locked. No detections are generated or evaluated on test data.
+# > **CRITICAL EVALUATION & ISOLATION INVARIANTS (Rule C3, C6, C7):**  
+# > - **Primary Detector:** Conformal prediction interval exceedance with temporal persistence ($k$-of-$n$) and business materiality filtering.  
+# > - **Severity Tiers:** Actionable classification into Info, Low, Medium, and High tiers based on dollar impact, percentage jump, and persistence.  
+# > - **A7.4 Test Quarantine:** The test partition ($D_{\text{test}}$) is strictly quarantined. Manifest records `holdout_touched=false`.
 
 # %% [markdown]
 # ## 1. Setup & Environment Installation
@@ -41,11 +40,9 @@ import sys
 import subprocess
 from pathlib import Path
 
-# Pinned repository commit SHA or branch for reproducibility
-PINNED_COMMIT_SHA = "main"
+PINNED_COMMIT_SHA = "v2-enterprise"
 REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
-# Clone if running on fresh Colab runtime
 if not os.path.exists("src/driftsense"):
     if os.path.exists("repo"):
         os.chdir("repo")
@@ -56,13 +53,17 @@ if not os.path.exists("src/driftsense"):
     if PINNED_COMMIT_SHA != "main":
         subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
 
-# Install driftsense package and dependencies
 print("Installing driftsense in development mode...")
 subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
 if os.path.exists("requirements-colab.txt"):
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
 
-print("Environment setup complete.")
+# Ensure src directory is on sys.path for active Colab kernel
+src_dir = os.path.abspath("src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+print(f"Environment setup complete. Added {src_dir} to sys.path.")
 
 # %% [markdown]
 # ## 2. Hardware Diagnostics
@@ -102,20 +103,19 @@ from driftsense.data.aggregate import aggregate_to_canonical_grain
 from driftsense.data.acquire import acquire_dataset
 from driftsense.eval.splits import chronological_split
 from driftsense.features.builder import FeaturePipeline
-from driftsense.forecast.xgb import XGBoostForecaster
+from driftsense.forecast.boosted import BoostedTreeForecaster
+from driftsense.forecast.conformal import SplitConformalCalibrator
 
-CONFIG_PATH = "configs/detect_focus.yaml"
+CONFIG_PATH = "configs/detect_v2.yaml"
 cfg, config_sha256 = load_config(CONFIG_PATH)
 
 dataset_cfg = cfg.get("dataset", {})
-synth_cfg = cfg.get("synthetic", {})
 det_cfg = cfg.get("detectors", {})
 eval_cfg = cfg.get("evaluation", {})
 
 train_path = Path(dataset_cfg.get("train_path", "data/splits/train_features.csv"))
 val_path = Path(dataset_cfg.get("val_path", "data/splits/val_features.csv"))
 
-# Verify or regenerate splits if running in a fresh workspace
 if not train_path.is_file() or not val_path.is_file():
     print("Feature splits not detected locally. Regenerating from pipeline...")
     raw_path = Path("data/raw/focus_sample_10000.csv")
@@ -132,7 +132,7 @@ if not train_path.is_file() or not val_path.is_file():
     df_agg, _ = aggregate_to_canonical_grain(df_clean, grain="1h")
     
     train_df, val_df, test_df, _ = chronological_split(df_agg, time_col="ChargePeriodStart")
-    pipeline = FeaturePipeline()
+    pipeline = FeaturePipeline(mode="A")
     pipeline.fit(train_df)
     train_feats = pipeline.transform(train_df)
     val_feats = pipeline.transform(val_df)
@@ -143,12 +143,11 @@ if not train_path.is_file() or not val_path.is_file():
     val_feats.to_csv(val_path, index=False)
     test_feats.to_csv(train_path.parent / "test_features.csv", index=False)
 
-# Load training and validation partitions
 df_train = pd.read_csv(train_path, low_memory=False)
 df_val = pd.read_csv(val_path, low_memory=False)
 
-# Strict A7.3 Isolation Guard
-assert "test" not in str(val_path).lower(), "A7.3 VIOLATION: Test split passed into validation evaluator!"
+# Strict Holdout Quarantine Guard (Rule C7)
+assert "test" not in str(val_path).lower(), "RULE C7 VIOLATION: Test split passed into validation detector!"
 print(f"Loaded Train Partition: {len(df_train):,} rows ({df_train['ServiceName'].nunique()} services)")
 print(f"Loaded Val Partition:   {len(df_val):,} rows ({df_val['ServiceName'].nunique()} services)")
 
@@ -158,96 +157,86 @@ service_col = dataset_cfg.get("service_col", "ServiceName")
 primary_metric = eval_cfg.get("primary_metric", "event_f1")
 
 # %% [markdown]
-# ## 5. Residual Calculation & Synthetic Ground-Truth Generation
+# ## 5. Baseline Forecaster & Conformal Band Generation
 
 # %%
-from driftsense.synth.injector import SyntheticInjector
+print("Fitting champion forecaster and calibrating conformal prediction intervals...")
+forecaster = BoostedTreeForecaster(n_estimators=100, max_depth=4, seed=42)
+forecaster.fit(df_train, target_col=target_col, time_col=time_col, service_col=service_col)
 
-# Obtain champion forecast model or train quick XGBoost regressor if standalone
-forecast_model_path = Path(dataset_cfg.get("forecast_model_path", ""))
-if forecast_model_path.is_file():
-    print(f"Loading champion forecaster from: {forecast_model_path}")
-    forecaster = XGBoostForecaster.load(forecast_model_path)
-else:
-    print("Training champion XGBoost forecaster for residual baseline...")
-    forecaster = XGBoostForecaster(n_estimators=100, max_depth=5, seed=42)
-    forecaster.fit(df_train, target_col=target_col, time_col=time_col, service_col=service_col)
+calibrator = SplitConformalCalibrator(forecaster=forecaster, default_alpha=0.10)
+calibrator.calibrate(df_val, target_col=target_col, alphas=(0.05, 0.10, 0.20))
 
-# Generate baseline point predictions
+y_pred_val, val_lower, val_upper = calibrator.predict_interval(df_val, alpha=0.10)
+
+df_val["EffectiveCost_expected"] = y_pred_val
+df_val["EffectiveCost_upper_bound"] = val_upper
+df_val["residual"] = df_val[target_col] - y_pred_val
+
 train_preds = forecaster.predict(df_train)
-val_preds = forecaster.predict(df_val)
-
 df_train["residual"] = df_train[target_col] - train_preds
-df_val["residual"] = df_val[target_col] - val_preds
 
-# Generate Calibrated Synthetic Ground Truth on D_val (Contract 5 & 6)
-print("Injecting calibrated operational anomalies into validation series...")
-injector = SyntheticInjector(
-    seed=synth_cfg.get("seed", 42),
-    injection_rate=synth_cfg.get("injection_rate", 0.03),
-    min_duration_hours=synth_cfg.get("min_duration_hours", 2),
-    max_duration_hours=synth_cfg.get("max_duration_hours", 6),
-    multiplier_range=tuple(synth_cfg.get("multiplier_range", [1.5, 3.5])),
-    sigma_range=tuple(synth_cfg.get("sigma_range", [2.5, 5.0])),
+# %% [markdown]
+# ## 6. Detector Suite Execution & Dual-Track Benchmarking
+
+# %%
+from driftsense.detect.interval import ForecastIntervalExceedanceDetector
+from driftsense.detect.changepoint import LevelShiftDetector
+from driftsense.detect.rolling import RollingThresholdDetector
+from driftsense.detect.zscore import ZScoreDetector
+from driftsense.detect.iforest import IsolationForestDetector
+from driftsense.detect.ocsvm import OneClassSVMDetector
+from driftsense.detect.severity import SeverityScorer
+from driftsense.synth.injector import SyntheticInjector
+from driftsense.eval.detection_metrics import (
+    alerts_per_spend,
+    alerts_per_week,
+    event_level_metrics,
+    point_level_metrics,
+    precision_recall_auc,
+    presumed_normal_alert_rate,
+    stratified_fp_analysis,
 )
+
+# Calibrated synthetic fault injection for Track 2 (Contract 6)
+injector = SyntheticInjector(seed=42, injection_rate=0.03, min_duration_hours=2, max_duration_hours=6)
 df_val_synth, labels, events = injector.inject(
     df_val,
     cost_col=target_col,
     service_col=service_col,
     time_col=time_col,
 )
-df_val_synth["residual"] = df_val_synth[target_col] - val_preds
-
-# Save ground-truth Contract 5 & 6 tables
-labels_path = RUN_DIR / "val_anomaly_labels.json"
-events_path = RUN_DIR / "val_operational_events.json"
-with open(labels_path, "w", encoding="utf-8") as f:
-    json.dump(labels, f, indent=2)
-with open(events_path, "w", encoding="utf-8") as f:
-    json.dump(events, f, indent=2)
-
-print(f"Generated {len(labels)} ground-truth anomaly events ({df_val_synth['is_anomaly'].sum()} total anomalous hours).")
-print(f"Generated {len(events)} operational events (including benign decoy deployments).")
-
-# %% [markdown]
-# ## 6. Detector Training & Dual-Track Validation Benchmarking
-
-# %%
-from driftsense.detect.zscore import ZScoreDetector
-from driftsense.detect.rolling_threshold import RollingThresholdDetector
-from driftsense.detect.iforest import IsolationForestDetector
-from driftsense.detect.ocsvm import OneClassSVMDetector
-from driftsense.eval.detection_metrics import (
-    point_level_metrics,
-    event_level_metrics,
-    stratified_fp_analysis,
-)
+df_val_synth["EffectiveCost_expected"] = y_pred_val
+df_val_synth["EffectiveCost_upper_bound"] = val_upper
+df_val_synth["residual"] = df_val_synth[target_col] - y_pred_val
 
 detectors = [
-    ZScoreDetector(
-        threshold=det_cfg.get("zscore", {}).get("threshold", 3.0),
-        per_service=det_cfg.get("zscore", {}).get("per_service", True),
-        one_sided=det_cfg.get("zscore", {}).get("one_sided", True),
-        config=det_cfg.get("zscore", {}),
+    ForecastIntervalExceedanceDetector(
+        name="conformal_interval_balanced",
+        sensitivity="Balanced",
+        actual_col=target_col,
+        expected_col="EffectiveCost_expected",
+        upper_bound_col="EffectiveCost_upper_bound",
     ),
-    RollingThresholdDetector(
-        window=det_cfg.get("rolling_threshold", {}).get("window", 24),
-        threshold=det_cfg.get("rolling_threshold", {}).get("threshold", 3.0),
-        config=det_cfg.get("rolling_threshold", {}),
+    ForecastIntervalExceedanceDetector(
+        name="conformal_interval_low",
+        sensitivity="Low",
+        actual_col=target_col,
+        expected_col="EffectiveCost_expected",
+        upper_bound_col="EffectiveCost_upper_bound",
     ),
-    IsolationForestDetector(
-        n_estimators=det_cfg.get("iforest", {}).get("n_estimators", 100),
-        contamination=det_cfg.get("iforest", {}).get("contamination", 0.03),
-        threshold=det_cfg.get("iforest", {}).get("threshold", 0.55),
-        seed=det_cfg.get("iforest", {}).get("seed", 42),
-        config=det_cfg.get("iforest", {}),
+    ForecastIntervalExceedanceDetector(
+        name="conformal_interval_high",
+        sensitivity="High",
+        actual_col=target_col,
+        expected_col="EffectiveCost_expected",
+        upper_bound_col="EffectiveCost_upper_bound",
     ),
-    OneClassSVMDetector(
-        kernel=det_cfg.get("ocsvm", {}).get("kernel", "rbf"),
-        nu=det_cfg.get("ocsvm", {}).get("nu", 0.03),
-        threshold=det_cfg.get("ocsvm", {}).get("threshold", 0.0),
-        config=det_cfg.get("ocsvm", {}),
-    ),
+    LevelShiftDetector(window=12, threshold=3.5),
+    RollingThresholdDetector(window=24, threshold=3.0),
+    ZScoreDetector(threshold=3.0, per_service=True),
+    IsolationForestDetector(n_estimators=100, contamination=0.03, threshold=0.55, seed=42),
+    OneClassSVMDetector(kernel="rbf", nu=0.03, threshold=0.0),
 ]
 
 saved_checkpoints = []
@@ -260,8 +249,8 @@ detections_dict = {
     "is_synthetic_anomaly": df_val_synth["is_anomaly"],
     "cost_actual_clean": df_val[target_col],
     "cost_actual_synth": df_val_synth[target_col],
-    "residual_clean": df_val["residual"],
-    "residual_synth": df_val_synth["residual"],
+    "cost_expected": df_val["EffectiveCost_expected"],
+    "cost_upper_bound": df_val["EffectiveCost_upper_bound"],
 }
 
 print("=== Fitting Detectors on D_train Residuals ===")
@@ -274,43 +263,34 @@ for i, det in enumerate(detectors, 1):
         time_col=time_col,
     )
 
-    # 1. Real Data Track
+    # 1. Real Track (presumed-normal clean series)
     clean_scores = det.score(df_val)
     clean_preds = det.predict(df_val)
     detections_dict[f"score_clean_{det.name}"] = clean_scores
     detections_dict[f"alert_clean_{det.name}"] = clean_preds
 
-    y_zero = np.zeros(len(df_val), dtype=int)
-    df_val_eval = df_val.copy()
-    df_val_eval["y_zero"] = y_zero
-    df_val_eval["pred"] = clean_preds
-    fp_strat = stratified_fp_analysis(df_val_eval, y_true_col="y_zero", y_pred_col="pred")
     results_real[det.name] = {
-        "total_points": len(df_val),
-        "false_positives": int(np.sum(clean_preds == 1)),
-        "fpr": float(np.mean(clean_preds == 1)),
-        "stratified_fpr": fp_strat,
+        "alerts_count": int(np.sum(clean_preds == 1)),
+        "presumed_normal_alert_rate": presumed_normal_alert_rate(clean_preds),
+        "alerts_per_week": alerts_per_week(clean_preds, df_val[time_col]),
+        "alerts_per_spend": alerts_per_spend(clean_preds, df_val[target_col]),
         "metadata": det.get_metadata(),
     }
 
-    # 2. Synthetic Track
+    # 2. Synthetic Ground-Truth Track
     synth_scores = det.score(df_val_synth)
     synth_preds = det.predict(df_val_synth)
     detections_dict[f"score_synth_{det.name}"] = synth_scores
     detections_dict[f"alert_synth_{det.name}"] = synth_preds
 
-    p_metrics = point_level_metrics(
-        y_true=df_val_synth["is_anomaly"].to_numpy(dtype=int),
-        y_pred=synth_preds,
-    )
-    ev_metrics = event_level_metrics(
-        timestamps=df_val_synth[time_col],
-        y_true=df_val_synth["is_anomaly"].to_numpy(dtype=int),
-        y_pred=synth_preds,
-    )
+    p_m = point_level_metrics(df_val_synth["is_anomaly"].to_numpy(dtype=int), synth_preds)
+    ev_m = event_level_metrics(df_val_synth[time_col], df_val_synth["is_anomaly"].to_numpy(dtype=int), synth_preds)
+    pr_auc = precision_recall_auc(df_val_synth["is_anomaly"].to_numpy(dtype=int), synth_scores)
+
     results_synthetic[det.name] = {
-        "point_metrics": p_metrics,
-        "event_metrics": ev_metrics,
+        "point_metrics": p_m,
+        "event_metrics": ev_m,
+        "pr_auc": pr_auc,
         "metadata": det.get_metadata(),
     }
 
@@ -318,68 +298,64 @@ for i, det in enumerate(detectors, 1):
     saved_checkpoints.append(str(chk))
     print(f"    Checkpointed: {chk.name}")
 
-# Print Track 1 Table
-print("\n" + "=" * 90)
-print("TRACK 1: REAL DATA TRACK (False Positive Rate & Diurnal Stratification)")
-print("=" * 90)
-h_real = f"{'Detector':<22} | {'Alerts':<8} | {'Overall FPR (%)':<15} | {'Weekday FPR (%)':<15} | {'Weekend FPR (%)':<15}"
-print(h_real)
-print("-" * len(h_real))
-for name, res in results_real.items():
-    st = res.get("stratified_fpr", {})
-    wk_fpr = st.get("weekday_fpr", 0.0) * 100.0
-    we_fpr = st.get("weekend_fpr", 0.0) * 100.0
-    print(
-        f"{name:<22} | {res['false_positives']:<8} | {res['fpr']*100:<15.2f} | {wk_fpr:<15.2f} | {we_fpr:<15.2f}"
-    )
-
-# Print Track 2 Table
-print("\n" + "=" * 90)
-print("TRACK 2: SYNTHETIC GROUND-TRUTH TRACK (Calibrated Incident Evaluation)")
-print("=" * 90)
-h_synth = f"{'Detector':<22} | {'Point F1':<10} | {'Point Prec':<10} | {'Point Rec':<10} | {'Event F1':<10} | {'Event Rec':<10} | {'Mean Delay (h)':<14}"
-print(h_synth)
-print("-" * len(h_synth))
-for name, res in results_synthetic.items():
-    pm = res["point_metrics"]
-    em = res["event_metrics"]
-    print(
-        f"{name:<22} | {pm['f1']:<10.4f} | {pm['precision']:<10.4f} | {pm['recall']:<10.4f} | {em['event_f1']:<10.4f} | {em['event_recall']:<10.4f} | {em['mean_delay_hours']:<14.2f}"
-    )
-
-# Select Champion Detector
+# Select Champion Detector based on validation Event-F1
 champion_name = max(
     results_synthetic.keys(),
     key=lambda k: results_synthetic[k]["event_metrics"].get(primary_metric, 0.0),
 )
-print("=" * 90)
-print(f"CHAMPION DETECTOR SELECTED: '{champion_name}' (Highest {primary_metric.upper()} on Validation Ground Truth)")
+
+print("\n" + "=" * 90)
+print(f"CHAMPION DETECTOR: '{champion_name}' (Highest {primary_metric.upper()} on D_val)")
 print("=" * 90)
 
-# Save validation metrics JSON
+# %% [markdown]
+# ## 7. Business Severity Scoring & Incident Categorization
+
+# %%
+scorer = SeverityScorer()
+df_val_synth["is_anomaly_detected"] = detections_dict[f"alert_synth_{champion_name}"]
+scored_df = scorer.score_dataframe(
+    df=df_val_synth,
+    actual_col=target_col,
+    expected_col="EffectiveCost_expected",
+    flags_col="is_anomaly_detected",
+    service_col=service_col,
+    time_col=time_col,
+)
+
+detections_dict["severity_score"] = scored_df["severity_score"]
+detections_dict["severity_tier"] = scored_df["severity_tier"]
+
+# Save severity incidents
+severity_incidents_path = RUN_DIR / "val_severity_incidents.csv"
+scored_df[scored_df["is_anomaly_detected"] == 1].to_csv(severity_incidents_path, index=False)
+
+tier_counts = scored_df[scored_df["is_anomaly_detected"] == 1]["severity_tier"].value_counts().to_dict()
+print(f"\nActionable Severity Tier Distribution for Champion alerts:")
+for tier, cnt in tier_counts.items():
+    print(f"  {tier:<8}: {cnt:,} incidents")
+
+# Save validation predictions and metrics
+val_detections_df = pd.DataFrame(detections_dict)
+val_detections_path = RUN_DIR / "val_detections_v2.csv"
+val_detections_df.to_csv(val_detections_path, index=False)
+
 metrics_payload = {
     "run_id": RUN_ID,
     "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "primary_metric": primary_metric,
     "champion_detector": champion_name,
-    "validation_rows": len(df_val),
-    "synthetic_incidents": len(labels),
+    "holdout_touched": False,
     "real_track": results_real,
     "synthetic_track": results_synthetic,
+    "severity_tier_distribution": tier_counts,
 }
-val_metrics_path = RUN_DIR / "val_detect_metrics.json"
+val_metrics_path = RUN_DIR / "val_detect_metrics_v2.json"
 with open(val_metrics_path, "w", encoding="utf-8") as f:
     json.dump(metrics_payload, f, indent=2)
-print(f"\nSaved validation detection metrics to: {val_metrics_path}")
-
-# Save validation detections CSV
-val_detections_df = pd.DataFrame(detections_dict)
-val_detections_path = RUN_DIR / "val_detections.csv"
-val_detections_df.to_csv(val_detections_path, index=False)
-print(f"Saved validation detections matrix to:  {val_detections_path}")
 
 # %% [markdown]
-# ## 7. Detection Visualizations
+# ## 8. Detection Visualizations
 
 # %%
 import matplotlib.pyplot as plt
@@ -401,15 +377,15 @@ for ax, svc in zip(axes, top_services):
     svc_data = df_val_synth[mask].sort_values(by=time_col)
     t = pd.to_datetime(svc_data[time_col], utc=True)
     
-    # Plot cost and residuals
     ax.plot(t, svc_data[target_col], label="Observed Cost ($)", color="black", linewidth=1.5, alpha=0.8)
-    ax.plot(t, svc_data["residual"], label="Residual e(t)", color="steelblue", linestyle="--", linewidth=1.2)
+    ax.plot(t, svc_data["EffectiveCost_expected"], label="Expected Spend ($)", color="forestgreen", linestyle="--", linewidth=1.2)
+    ax.plot(t, svc_data["EffectiveCost_upper_bound"], label="Conformal Upper Bound ($)", color="crimson", linestyle=":", linewidth=1.2)
     
     # Ground truth anomalies
     anom_points = svc_data[svc_data["is_anomaly"] == 1]
     if not anom_points.empty:
         t_anom = pd.to_datetime(anom_points[time_col], utc=True)
-        ax.scatter(t_anom, anom_points[target_col], color="crimson", marker="x", s=60, label="True Anomaly Window", zorder=5)
+        ax.scatter(t_anom, anom_points[target_col], color="red", marker="x", s=60, label="True Fault Event", zorder=5)
 
     # Champion detector alerts
     alert_col = f"alert_synth_{champion_name}"
@@ -421,18 +397,18 @@ for ax, svc in zip(axes, top_services):
             ax.scatter(t_trig, triggered["cost_actual_synth"], color="orange", marker="o", facecolors="none", s=100, linewidth=1.8, label=f"Alert: {champion_name}", zorder=6)
 
     ax.set_title(f"Validation Incident Timeline: {svc}", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Cost / Residual ($)")
+    ax.set_ylabel("Cost ($)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", framealpha=0.9)
 
 plt.tight_layout()
-plot_path = RUN_DIR / "detection_comparison.png"
+plot_path = RUN_DIR / "detection_comparison_v2.png"
 fig.savefig(plot_path, dpi=200, bbox_inches="tight")
 plt.close(fig)
 print(f"Saved detection timeline plot to: {plot_path}")
 
 # %% [markdown]
-# ## 8. Run Manifest Compilation & Anti-Leakage Audit
+# ## 9. Run Manifest Compilation & Holdout Quarantine Audit
 
 # %%
 from driftsense.runtime.manifest import ManifestBuilder, verify_manifest
@@ -455,21 +431,20 @@ for chk in saved_checkpoints:
     builder.add_artifact(chk)
 builder.add_artifact(str(val_metrics_path))
 builder.add_artifact(str(val_detections_path))
-builder.add_artifact(str(labels_path))
-builder.add_artifact(str(events_path))
+builder.add_artifact(str(severity_incidents_path))
 builder.add_artifact(str(plot_path))
 
 manifest_path = builder.save(RUN_DIR)
 print(f"\nManifest successfully emitted to: {manifest_path}")
 
-# Strict A7.3 Anti-Leakage Audit
+# Strict Rule C7 Holdout Quarantine Audit
 manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
 for art in manifest_data.get("artifacts", []):
     path_str = art.get("path", "").lower()
-    assert "test_features" not in path_str, f"A7.3 LEAKAGE: Test split found in manifest: {path_str}"
-    assert "test_detect" not in path_str, f"A7.3 LEAKAGE: Test detections found in manifest: {path_str}"
+    assert "test_features" not in path_str, f"C7 LEAKAGE: Test split found in manifest: {path_str}"
+    assert "test_detect" not in path_str, f"C7 LEAKAGE: Test detections found in manifest: {path_str}"
 
-print("PASS: A7.3 Anti-Leakage Invariant Verified (Zero test artifacts in manifest).")
+print("PASS: Rule C7 Holdout Quarantine Invariant Verified (Zero test artifacts in manifest).")
 
 is_valid, errors = verify_manifest(RUN_DIR, require_datasets=True)
 if is_valid:
@@ -477,21 +452,3 @@ if is_valid:
 else:
     print(f"FAIL: Manifest verification failed: {errors}")
     sys.exit(1)
-
-# %% [markdown]
-# ## 9. Artifact Archival & Download
-
-# %%
-import shutil
-
-zip_filename = f"{RUN_ID}.zip"
-zip_path = shutil.make_archive(RUN_ID, "zip", RUN_DIR)
-shutil.move(zip_path, zip_filename)
-print(f"\nRun artifacts successfully archived to: {zip_filename} ({os.path.getsize(zip_filename):,} bytes)")
-
-try:
-    from google.colab import files
-    print("Triggering browser download for Colab run archive...")
-    files.download(zip_filename)
-except ImportError:
-    print(f"Local environment: Run artifacts available at {RUN_DIR.resolve()}")

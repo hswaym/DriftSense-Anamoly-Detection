@@ -35,7 +35,7 @@ import subprocess
 from pathlib import Path
 
 # Pinned repository commit SHA or branch for reproducibility
-PINNED_COMMIT_SHA = "main"
+PINNED_COMMIT_SHA = "v2-enterprise"
 REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
 # Clone if running on fresh Colab runtime
@@ -55,7 +55,12 @@ subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
 if os.path.exists("requirements-colab.txt"):
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
 
-print("Environment setup complete.")
+# Ensure src directory is on sys.path for active Colab kernel
+src_dir = os.path.abspath("src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+print(f"Environment setup complete. Added {src_dir} to sys.path.")
 
 # %% [markdown]
 # ## 2. Hardware Diagnostics

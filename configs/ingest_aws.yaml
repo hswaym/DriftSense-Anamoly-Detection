@@ -1,0 +1,16 @@
+# DriftSense v2 — Ingestion Configuration: AWS CUR 2.0
+
+ingest:
+  provider: "aws_cur"
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  input_path: "data/raw/aws_cur_sample.csv"
+  output_path: "data/processed/canonical_aws.csv"
+  currency: "USD"
+  handle_refunds: "include"
+  dedup: "drop"
+
+quality:
+  data_path: "data/processed/canonical_aws.csv"
+  report_out: "reports/quality_aws.md"
+  json_out: "reports/quality_aws.json"
+  fail_under: 75.0

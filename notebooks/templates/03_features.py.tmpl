@@ -12,24 +12,27 @@
 # ---
 
 # %% [markdown]
-# # DriftSense — 03: Feature Engineering and Chronological Partitioning
+# # DriftSense — 03: Feature Engineering and Chronological Partitioning (v2)
 #
 # **Runtime Type:** Python 3 (CPU)  
 # **Estimated Runtime:** ~1-2 minutes  
 # **RAM Needed:** ~2-4 GB  
 # **Disk Needed:** ~1 GB  
 # **Expected Outputs:**  
-# - Full Feature Matrix: `data/processed/focus_features_1h.csv`  
+# - Mode A Feature Matrix: `data/processed/focus_features_1h.csv`  
+# - Mode B Feature Matrix: `data/processed/focus_features_1h_mode_b.csv`  
 # - Train Partition: `data/splits/train_features.csv`  
 # - Validation Partition: `data/splits/val_features.csv`  
 # - Test Partition: `data/splits/test_features.csv`  
-# - Split Metadata Summary: `runs/<run_id>/split_summary.json`  
+# - Feature Contract Summary: `runs/<run_id>/feature_contract_summary.json`  
 # - Run Manifest: `runs/<run_id>/manifest.json`  
 #
-# > **CRITICAL ANTI-LEAKAGE INVARIANTS (G6 & Contract 8):**  
-# > - Split chronologically BEFORE fitting any scaler, encoder, or learned feature.  
+# > **CRITICAL ANTI-LEAKAGE INVARIANTS (Rule C6 & Contracts):**  
+# > - Split chronologically BEFORE fitting any scaler or learned feature.  
 # > - Fit all feature transformers strictly on the training partition ($D_{\text{train}}$).  
-# > - Rolling windows and usage metrics compute strictly over historical observations ($< t$).  
+# > - Mode A strictly excludes contemporaneous usage ($ConsumedQuantity$ at $t$) to flag usage-driven spikes.  
+# > - Mode B conditions on contemporaneous usage to detect rate and efficiency anomalies.  
+# > - Contemporaneous cost columns ($BilledCost$, $ListCost$) are strictly prohibited from entering features.  
 # > - Ground-truth anomaly labels are strictly quarantined from all feature matrices.
 
 # %% [markdown]
@@ -41,11 +44,9 @@ import sys
 import subprocess
 from pathlib import Path
 
-# Pinned repository commit SHA or branch for reproducibility
-PINNED_COMMIT_SHA = "main"
+PINNED_COMMIT_SHA = "v2-enterprise"
 REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
-# Clone if running on fresh Colab runtime
 if not os.path.exists("src/driftsense"):
     if os.path.exists("repo"):
         os.chdir("repo")
@@ -56,13 +57,17 @@ if not os.path.exists("src/driftsense"):
     if PINNED_COMMIT_SHA != "main":
         subprocess.run(["git", "checkout", PINNED_COMMIT_SHA], check=True)
 
-# Install driftsense package and dependencies
 print("Installing driftsense in development mode...")
 subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
 if os.path.exists("requirements-colab.txt"):
     subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements-colab.txt"], check=True)
 
-print("Environment setup complete.")
+# Ensure src directory is on sys.path for active Colab kernel
+src_dir = os.path.abspath("src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+print(f"Environment setup complete. Added {src_dir} to sys.path.")
 
 # %% [markdown]
 # ## 2. Hardware Diagnostics
@@ -169,12 +174,18 @@ with open(split_summary_path, "w", encoding="utf-8") as f:
     json.dump(split_summary, f, indent=2)
 
 # %% [markdown]
-# ## 6. Feature Pipeline Execution (Fit-on-Train)
+# ## 6. Feature Pipeline Execution (Mode A & Mode B)
 
 # %%
-from driftsense.features.builder import FeaturePipeline
+from driftsense.features.builder import (
+    FORBIDDEN_CONTEMPORANEOUS_COST_COLUMNS,
+    FORBIDDEN_FEATURE_LABELS,
+    FeaturePipeline,
+)
 
-pipeline = FeaturePipeline(
+# Initialize Mode A Pipeline (History-expected)
+pipeline_a = FeaturePipeline(
+    mode="A",
     target_col=feat_cfg.get("target_col", "EffectiveCost"),
     service_col=feat_cfg.get("service_col", "ServiceName"),
     time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
@@ -183,18 +194,43 @@ pipeline = FeaturePipeline(
     cost_windows=feat_cfg.get("cost_windows", [3, 6, 24, 168]),
     usage_lags=feat_cfg.get("usage_lags", [1, 2, 24]),
     usage_windows=feat_cfg.get("usage_windows", [6, 24]),
+    include_hierarchy=True,
+    include_deltas=True,
+    scale_features=feat_cfg.get("scale_features", False),
+)
+
+# Initialize Mode B Pipeline (Usage-expected)
+pipeline_b = FeaturePipeline(
+    mode="B",
+    target_col=feat_cfg.get("target_col", "EffectiveCost"),
+    service_col=feat_cfg.get("service_col", "ServiceName"),
+    time_col=feat_cfg.get("time_col", "ChargePeriodStart"),
+    usage_col=feat_cfg.get("usage_col", "ConsumedQuantity"),
+    cost_lags=feat_cfg.get("cost_lags", [1, 2, 3, 24, 168]),
+    cost_windows=feat_cfg.get("cost_windows", [3, 6, 24, 168]),
+    usage_lags=feat_cfg.get("usage_lags", [1, 2, 24]),
+    usage_windows=feat_cfg.get("usage_windows", [6, 24]),
+    include_hierarchy=True,
+    include_deltas=True,
     scale_features=feat_cfg.get("scale_features", False),
 )
 
 # Fit strictly on train partition
-print("Fitting FeaturePipeline on train partition...")
-pipeline.fit(train_df)
+print("Fitting FeaturePipeline Mode A on train partition...")
+pipeline_a.fit(train_df)
 
-# Transform each partition using frozen parameters
-print("Transforming train, val, and test partitions...")
-train_feats = pipeline.transform(train_df)
-val_feats = pipeline.transform(val_df)
-test_feats = pipeline.transform(test_df)
+print("Fitting FeaturePipeline Mode B on train partition...")
+pipeline_b.fit(train_df)
+
+# Anti-leakage checks
+leaked_cost = FORBIDDEN_CONTEMPORANEOUS_COST_COLUMNS.intersection(pipeline_a.feature_names_)
+assert not leaked_cost, f"CRITICAL LEAKAGE: Contemporaneous cost in features: {leaked_cost}"
+
+# Transform partitions (Mode A)
+print("Transforming train, val, and test partitions (Mode A)...")
+train_feats = pipeline_a.transform(train_df)
+val_feats = pipeline_a.transform(val_df)
+test_feats = pipeline_a.transform(test_df)
 
 # Save partition files
 splits_dir = Path(dataset_cfg.get("splits_dir", "data/splits"))
@@ -208,19 +244,37 @@ train_feats.to_csv(train_split_path, index=False)
 val_feats.to_csv(val_split_path, index=False)
 test_feats.to_csv(test_split_path, index=False)
 
-print(f"Saved train features: {train_split_path} ({train_split_path.stat().st_size:,} bytes)")
-print(f"Saved val features:   {val_split_path} ({val_split_path.stat().st_size:,} bytes)")
-print(f"Saved test features:  {test_split_path} ({test_split_path.stat().st_size:,} bytes)")
-
-# Combined feature matrix
+# Mode A Combined Feature Matrix
 output_feat_path = Path(dataset_cfg.get("output_path", "data/processed/focus_features_1h.csv"))
 output_feat_path.parent.mkdir(parents=True, exist_ok=True)
-full_feats = pd.concat([train_feats, val_feats, test_feats], ignore_index=True)
-full_feats.to_csv(output_feat_path, index=False)
+full_feats_a = pd.concat([train_feats, val_feats, test_feats], ignore_index=True)
+full_feats_a.to_csv(output_feat_path, index=False)
 
-print(f"\nFull feature matrix saved to: {output_feat_path} ({output_feat_path.stat().st_size:,} bytes)")
-print(f"Total Rows: {len(full_feats):,} | Total Columns: {len(full_feats.columns)}")
-print(f"Engineered Features ({len(pipeline.feature_names_)}): {pipeline.feature_names_[:8]} ...")
+# Mode B Combined Feature Matrix
+output_mode_b_path = Path("data/processed/focus_features_1h_mode_b.csv")
+full_feats_b = pipeline_b.fit_transform(df_input)
+full_feats_b.to_csv(output_mode_b_path, index=False)
+
+print(f"\nMode A Feature Matrix: {output_feat_path} ({output_feat_path.stat().st_size:,} bytes)")
+print(f"Mode B Feature Matrix: {output_mode_b_path} ({output_mode_b_path.stat().st_size:,} bytes)")
+print(f"Total Rows: {len(full_feats_a):,} | Mode A Features: {len(pipeline_a.feature_names_)} | Mode B Features: {len(pipeline_b.feature_names_)}")
+
+# Save contract summary
+contract_a = pipeline_a.get_feature_contract()
+contract_summary = {
+    name: {
+        "formula": meta.formula,
+        "window": meta.window,
+        "includes_current_row": meta.includes_current_row,
+        "known_at_prediction_time": meta.known_at_prediction_time,
+        "mode": meta.mode,
+        "source": meta.source_column,
+    }
+    for name, meta in contract_a.items()
+}
+contract_path = RUN_DIR / "feature_contract_summary.json"
+with open(contract_path, "w", encoding="utf-8") as f:
+    json.dump(contract_summary, f, indent=2)
 
 # %% [markdown]
 # ## 7. Manifest Compilation and Integrity Verification
@@ -241,10 +295,12 @@ builder = ManifestBuilder(
 
 builder.add_dataset(str(input_path))
 builder.add_artifact(str(split_summary_path))
+builder.add_artifact(str(contract_path))
 builder.add_artifact(str(train_split_path))
 builder.add_artifact(str(val_split_path))
 builder.add_artifact(str(test_split_path))
 builder.add_artifact(str(output_feat_path))
+builder.add_artifact(str(output_mode_b_path))
 
 manifest_path = builder.save(RUN_DIR)
 print(f"\nManifest successfully generated at: {manifest_path}")

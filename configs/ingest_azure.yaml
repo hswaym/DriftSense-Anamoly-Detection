@@ -1,0 +1,16 @@
+# DriftSense v2 — Ingestion Configuration: Azure Cost Management
+
+ingest:
+  provider: "azure_cost"
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  input_path: "data/raw/azure_sample.csv"
+  output_path: "data/processed/canonical_azure.csv"
+  currency: "USD"
+  handle_refunds: "include"
+  dedup: "drop"
+
+quality:
+  data_path: "data/processed/canonical_azure.csv"
+  report_out: "reports/quality_azure.md"
+  json_out: "reports/quality_azure.json"
+  fail_under: 75.0

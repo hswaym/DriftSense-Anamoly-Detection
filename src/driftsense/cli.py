@@ -16,6 +16,8 @@ from driftsense.data.acquire import acquire_dataset
 from driftsense.data.aggregate import aggregate_to_canonical_grain
 from driftsense.data.clean import clean_focus_data
 from driftsense.data.validate import validate_dataset
+from driftsense.ingest import ingest_file
+from driftsense.quality import generate_quality_report
 from driftsense.runtime.config import load_config
 from driftsense.runtime.hardware import check_hardware
 from driftsense.runtime.manifest import verify_manifest
@@ -128,6 +130,140 @@ def cmd_verify_manifest(args: argparse.Namespace) -> int:
         )
         for err in errors:
             print(f"  - {err}", file=sys.stderr)
+        return 1
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Execute multi-cloud billing file ingestion to canonical FOCUS schema."""
+    from pathlib import Path
+
+
+    input_path = args.input
+    output_path = args.output
+    provider = args.provider or "auto"
+    tenant_id = args.tenant_id or "00000000-0000-0000-0000-000000000000"
+    handle_refunds = args.handle_refunds or "include"
+    dedup = args.dedup or "drop"
+    currency = args.currency or "USD"
+
+    if args.config:
+        cfg, _ = load_config(args.config)
+        ingest_cfg = cfg.get("ingest", {})
+        input_path = input_path or ingest_cfg.get("input_path")
+        output_path = output_path or ingest_cfg.get("output_path")
+        provider = provider if args.provider else ingest_cfg.get("provider", "auto")
+        tenant_id = tenant_id if args.tenant_id else ingest_cfg.get("tenant_id", tenant_id)
+        handle_refunds = handle_refunds if args.handle_refunds else ingest_cfg.get("handle_refunds", "include")
+        dedup = dedup if args.dedup else ingest_cfg.get("dedup", "drop")
+        currency = currency if args.currency else ingest_cfg.get("currency", "USD")
+
+    if not input_path:
+        print("ERROR: Target input path (--input or --config) is required.", file=sys.stderr)
+        return 1
+    if not output_path:
+        print("ERROR: Output path (--output or --config) is required.", file=sys.stderr)
+        return 1
+
+    try:
+        df_canon, meta = ingest_file(
+            file_path=input_path,
+            provider=provider,
+            tenant_id=tenant_id,
+            default_currency=currency,
+            handle_refunds=handle_refunds,
+            dedup=dedup,
+        )
+
+        p_out = Path(output_path)
+        p_out.parent.mkdir(parents=True, exist_ok=True)
+        if p_out.suffix.lower() in [".parquet", ".pq"]:
+            df_canon.to_parquet(p_out, index=False)
+        else:
+            df_canon.to_csv(p_out, index=False)
+
+        print("=== DriftSense Ingestion Summary ===")
+        print(f"Source File:         {meta['file_name']}")
+        print(f"Detected Format:     {meta['detected_provider']} (v{meta['detected_version']}) [Confidence: {meta['detection_confidence']:.2f}]")
+        print(f"Resolved Provider:   {meta['resolved_provider']}")
+        print(f"Raw Records:         {meta['raw_rows']:,}")
+        print(f"Canonical Records:   {meta['canonical_rows']:,}")
+        print(f"Dropped Duplicates:  {meta['dropped_duplicates']:,}")
+        if meta["unmapped_columns"]:
+            print(f"Unmapped Columns ({len(meta['unmapped_columns'])}): {meta['unmapped_columns'][:5]}")
+            for u in meta["unmapped_columns"][:3]:
+                if u in meta["mapping_suggestions"]:
+                    sugg, conf = meta["mapping_suggestions"][u]
+                    print(f"  * Suggestion for '{u}': '{sugg}' (conf: {conf:.2f})")
+        print(f"Canonical output saved to: {output_path}")
+        return 0
+    except Exception as e:
+        print(f"ERROR: Ingestion failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_quality(args: argparse.Namespace) -> int:
+    """Execute dataset quality assessment and compute 0–100 score."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    data_path = args.data
+    report_out = args.report_out
+    json_out = args.json_out
+    fail_under = args.fail_under
+
+    if args.config:
+        cfg, _ = load_config(args.config)
+        qual_cfg = cfg.get("quality", {})
+        data_path = data_path or qual_cfg.get("data_path")
+        report_out = report_out or qual_cfg.get("report_out")
+        json_out = json_out or qual_cfg.get("json_out")
+        fail_under = fail_under if fail_under is not None else qual_cfg.get("fail_under")
+
+    if not data_path:
+        print("ERROR: Data path (--data or --config) is required.", file=sys.stderr)
+        return 1
+
+    try:
+        p_data = Path(data_path)
+        if p_data.suffix.lower() in [".parquet", ".pq"]:
+            df = pd.read_parquet(p_data)
+        else:
+            df = pd.read_csv(p_data, low_memory=False)
+
+        report = generate_quality_report(
+            df=df,
+            dataset_name=p_data.name,
+            output_json=json_out,
+            output_md=report_out,
+        )
+
+        print("=== DriftSense Data Quality Assessment ===")
+        print(f"Dataset:       {report['dataset_name']}")
+        print(f"Total Records: {report['total_rows']:,}")
+        print(f"Quality Score: {report['quality_score']}/100 (Grade: {report['grade']})")
+        print(f"Summary:       {report['summary']}")
+        if report["deductions"]:
+            print(f"\nDeductions Breakdown ({len(report['deductions'])}):")
+            for d in report["deductions"]:
+                print(f"  - [{d['category']}] -{d['points_deducted']} pts: {d['reason']}")
+                print(f"    Actionable Fix: {d['actionable_fix']}")
+
+        if report_out:
+            print(f"\nMarkdown report written to: {report_out}")
+        if json_out:
+            print(f"JSON metrics written to:     {json_out}")
+
+        if fail_under is not None and report["quality_score"] < float(fail_under):
+            print(
+                f"\nFAIL: Quality score ({report['quality_score']}) is below required threshold ({fail_under}).",
+                file=sys.stderr,
+            )
+            return 1
+
+        return 0
+    except Exception as e:
+        print(f"ERROR: Quality assessment failed: {e}", file=sys.stderr)
         return 1
 
 
@@ -1239,6 +1375,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Require dataset files to be present locally for hash verification",
     )
     p_vm.set_defaults(func=cmd_verify_manifest)
+
+    # ingest
+    p_ing = subparsers.add_parser(
+        "ingest", help="Ingest multi-cloud billing file to canonical FOCUS schema"
+    )
+    p_ing.add_argument("--config", help="Path to ingestion configuration YAML")
+    p_ing.add_argument("--input", help="Path to input raw billing export CSV/Parquet")
+    p_ing.add_argument("--output", help="Path to output canonical CSV/Parquet")
+    p_ing.add_argument("--provider", default="auto", choices=["auto", "focus", "aws_cur", "azure_cost", "gcp_billing"], help="Cloud billing provider")
+    p_ing.add_argument("--tenant-id", default="00000000-0000-0000-0000-000000000000", help="Tenant UUID")
+    p_ing.add_argument("--handle-refunds", default="include", choices=["include", "exclude", "zero_clamp"], help="Refund/credit handling policy")
+    p_ing.add_argument("--dedup", default="drop", choices=["drop", "keep"], help="Deduplication policy")
+    p_ing.add_argument("--currency", default="USD", help="Single reporting currency")
+    p_ing.set_defaults(func=cmd_ingest)
+
+    # quality
+    p_qual = subparsers.add_parser(
+        "quality", help="Evaluate dataset quality score (0-100) and emit diagnostic report"
+    )
+    p_qual.add_argument("--config", help="Path to quality configuration YAML")
+    p_qual.add_argument("--data", help="Path to input billing dataset CSV/Parquet")
+    p_qual.add_argument("--report-out", help="Path to output Markdown quality report")
+    p_qual.add_argument("--json-out", help="Path to output JSON quality metrics")
+    p_qual.add_argument("--fail-under", type=float, help="Fail with exit code 1 if score < threshold")
+    p_qual.set_defaults(func=cmd_quality)
 
     # clean
     p_cln = subparsers.add_parser(

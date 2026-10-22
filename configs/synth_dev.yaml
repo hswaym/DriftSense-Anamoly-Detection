@@ -1,0 +1,31 @@
+# DriftSense v2 — Scenario Generator Configuration: Development Split
+
+scenario:
+  name: "dev_adversarial_suite"
+  is_holdout: false
+  seeds: [42, 101, 202, 303]
+  min_faults_per_service: 1
+  max_faults_per_service: 3
+  decoy_to_fault_ratio: 3.0
+  magnitude_range: [1.20, 3.50]
+  duration_range_hours: [3, 12]
+
+  # Dev & Validation Partition (10 allowed families)
+  allowed_fault_families:
+    - "usage_spike"
+    - "gradual_ramp_drift"
+    - "rate_price_change"
+    - "new_service_appearance"
+    - "data_transfer_surge"
+    - "autoscaling_overprovision"
+    - "runaway_batch"
+    - "deployment_defect"
+    - "config_change"
+    - "month_end_seasonality_shift"
+
+io:
+  clean_input_path: "data/raw/focus_sample_10000.csv"
+  output_billing_path: "data/scenarios/dev_billing.csv"
+  output_events_path: "data/scenarios/dev_events.csv"
+  output_labels_path: "data/scenarios/dev_labels.csv"
+  calibration_profile_path: "data/scenarios/dev_calibration_profile.json"

@@ -1,10 +1,8 @@
-"""Synthetic event and anomaly injection engine for DriftSense.
+"""DriftSense v2 Adversarial Fault Injection Engine.
 
-Conforms strictly to Contract 5, Contract 6, and docs/synth/generator_design.md:
-- Ground-truth anomalies are defined independently of detector output.
-- Injects statistically calibrated spikes and multi-hour incident windows.
-- Injects benign decoy events (change without cost impact) to test false-positive resistance.
-- Emits paired anomaly_labels and operational_events records.
+Replaces v1 naive deterministic additive spikes with 15 calibrated fault families,
+multiple onset curves (abrupt, gradual linear, gradual exponential, step),
+and decoupled volume vs. rate perturbations.
 """
 
 from __future__ import annotations
@@ -15,9 +13,189 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from driftsense.synth.labels import GroundTruthIncident
+
+ALL_FAULT_FAMILIES = [
+    "usage_spike",
+    "gradual_ramp_drift",
+    "level_shift",
+    "rate_price_change",
+    "new_service_appearance",
+    "region_migration",
+    "untagged_spend_growth",
+    "commitment_discount_expiry",
+    "data_transfer_surge",
+    "credit_refund_artifact",
+    "month_end_seasonality_shift",
+    "autoscaling_overprovision",
+    "runaway_batch",
+    "deployment_defect",
+    "config_change",
+]
+
+# Leave-Family-Out Partition
+DEV_FAULT_FAMILIES = [
+    "usage_spike",
+    "gradual_ramp_drift",
+    "rate_price_change",
+    "new_service_appearance",
+    "data_transfer_surge",
+    "autoscaling_overprovision",
+    "runaway_batch",
+    "deployment_defect",
+    "config_change",
+    "month_end_seasonality_shift",
+]
+
+HOLDOUT_RESERVED_FAULT_FAMILIES = [
+    "level_shift",
+    "region_migration",
+    "untagged_spend_growth",
+    "commitment_discount_expiry",
+    "credit_refund_artifact",
+]
+
+
+class CalibratedFaultInjector:
+    """Enterprise-grade fault injection engine supporting 15 parametric fault families."""
+
+    def __init__(
+        self,
+        seed: int = 42,
+        allowed_fault_families: list[str] | None = None,
+        min_duration_hours: int = 3,
+        max_duration_hours: int = 12,
+        magnitude_range: tuple[float, float] = (1.20, 3.50),
+    ) -> None:
+        self.seed = seed
+        self.allowed_families = allowed_fault_families or DEV_FAULT_FAMILIES
+        self.min_duration = min_duration_hours
+        self.max_duration = max_duration_hours
+        self.magnitude_range = magnitude_range
+        self.rng = np.random.default_rng(seed)
+
+    def inject_incident(
+        self,
+        df: pd.DataFrame,
+        service_name: str,
+        start_idx: int,
+        duration_hours: int,
+        fault_family: str,
+        magnitude: float,
+        onset_shape: str = "abrupt",
+        cost_col: str = "EffectiveCost",
+        quantity_col: str = "ConsumedQuantity",
+        billed_col: str = "BilledCost",
+        time_col: str = "ChargePeriodStart",
+    ) -> tuple[pd.DataFrame, GroundTruthIncident, dict[str, Any]]:
+        """Inject a single calibrated fault episode into DataFrame."""
+        if fault_family not in ALL_FAULT_FAMILIES:
+            raise ValueError(f"Unknown fault family: '{fault_family}'. Must be one of {ALL_FAULT_FAMILIES}")
+
+        out = df.copy()
+        svc_mask = out["ServiceName"] == service_name
+        svc_indices = out[svc_mask].index.to_numpy()
+
+        if start_idx + duration_hours > len(svc_indices):
+            duration_hours = max(1, len(svc_indices) - start_idx)
+
+        target_indices = [svc_indices[start_idx + i] for i in range(duration_hours)]
+        incident_id = f"inc_{uuid.uuid4().hex[:8]}"
+        event_id = f"evt_{uuid.uuid4().hex[:8]}"
+
+        # Compute perturbation curve over duration
+        steps = np.arange(duration_hours)
+        if onset_shape == "gradual_linear":
+            ramp = 1.0 + (magnitude - 1.0) * (steps + 1) / duration_hours
+        elif onset_shape == "gradual_exponential":
+            ramp = 1.0 + (magnitude - 1.0) * (np.exp(steps / max(1, duration_hours - 1)) - 1.0) / (np.e - 1.0)
+        else:  # 'abrupt' or 'step'
+            ramp = np.full(duration_hours, magnitude)
+
+        # Apply fault physics based on family
+        if fault_family in ["usage_spike", "runaway_batch", "autoscaling_overprovision", "data_transfer_surge"]:
+            # Volume runaway: Both quantity and cost increase proportionally
+            for i, idx in enumerate(target_indices):
+                orig_q = max(0.01, float(out.loc[idx, quantity_col]))
+                orig_c = max(0.01, float(out.loc[idx, cost_col]))
+                unit_rate = orig_c / orig_q
+                new_q = orig_q * ramp[i]
+                new_c = new_q * unit_rate
+                out.loc[idx, quantity_col] = round(new_q, 4)
+                out.loc[idx, cost_col] = round(new_c, 4)
+                if billed_col in out.columns:
+                    out.loc[idx, billed_col] = round(new_c, 4)
+
+        elif fault_family in ["rate_price_change", "commitment_discount_expiry"]:
+            # Rate anomaly: ConsumedQuantity is UNCHANGED, but EffectiveCost surges
+            for i, idx in enumerate(target_indices):
+                orig_c = max(0.01, float(out.loc[idx, cost_col]))
+                new_c = orig_c * ramp[i]
+                out.loc[idx, cost_col] = round(new_c, 4)
+                if billed_col in out.columns:
+                    out.loc[idx, billed_col] = round(new_c, 4)
+
+        elif fault_family == "untagged_spend_growth":
+            # Cost increases and tags are stripped
+            for i, idx in enumerate(target_indices):
+                orig_c = max(0.01, float(out.loc[idx, cost_col]))
+                out.loc[idx, cost_col] = round(orig_c * ramp[i], 4)
+                if "Tags" in out.columns:
+                    out.loc[idx, "Tags"] = "{}"
+
+        elif fault_family == "credit_refund_artifact":
+            # Injects negative cost artifact or removes credits
+            for i, idx in enumerate(target_indices):
+                orig_c = max(0.01, float(out.loc[idx, cost_col]))
+                out.loc[idx, cost_col] = round(orig_c * 0.2, 4)  # sudden 80% collapse
+
+        else:
+            # Generic cost increase (level_shift, deployment_defect, config_change, etc.)
+            for i, idx in enumerate(target_indices):
+                orig_c = max(0.01, float(out.loc[idx, cost_col]))
+                out.loc[idx, cost_col] = round(orig_c * ramp[i], 4)
+                if billed_col in out.columns:
+                    out.loc[idx, billed_col] = round(orig_c * ramp[i], 4)
+
+        start_dt = str(out.loc[target_indices[0], time_col])
+        end_dt = str(out.loc[target_indices[-1], time_col])
+        sub_acc = str(out.loc[target_indices[0], "SubAccountId"]) if "SubAccountId" in out.columns else "acc-default"
+
+        incident = GroundTruthIncident(
+            incident_id=incident_id,
+            scenario_id=f"scen_{fault_family}",
+            service_name=service_name,
+            sub_account_id=sub_acc,
+            fault_family=fault_family,
+            start_time=start_dt,
+            end_time=end_dt,
+            duration_hours=duration_hours,
+            magnitude_multiplier=round(float(magnitude), 2),
+            onset_shape=onset_shape,
+            is_synthetic=True,
+            true_cause_list=[fault_family],
+            ground_truth_event_id=event_id,
+            is_confounded=False,
+            has_decoy=False,
+        )
+
+        event = {
+            "event_id": event_id,
+            "tenant_id": str(out.loc[target_indices[0], "tenant_id"]) if "tenant_id" in out.columns else "default",
+            "timestamp": start_dt,
+            "service_name": service_name,
+            "sub_account_id": sub_acc,
+            "event_type": fault_family,
+            "summary": f"Injected operational trigger: {fault_family.replace('_', ' ').title()}",
+            "is_decoy": False,
+            "details": {"magnitude": magnitude, "duration_hours": duration_hours},
+        }
+
+        return out, incident, event
+
 
 class SyntheticInjector:
-    """Controlled fault and anomaly injector calibrated to historical empirical statistics."""
+    """Controlled fault and anomaly injector calibrated to historical empirical statistics (v1 compatibility)."""
 
     def __init__(
         self,
@@ -44,14 +222,7 @@ class SyntheticInjector:
         time_col: str = "ChargePeriodStart",
         target_services: list[str] | None = None,
     ) -> tuple[pd.DataFrame, list[dict[str, Any]], list[dict[str, Any]]]:
-        """Inject calibrated anomalies into billing series.
-
-        Returns:
-            Tuple of:
-            - df_injected: copy of dataframe with perturbed costs and binary 'is_anomaly' label.
-            - anomaly_labels: list of ground-truth incident records (Contract 6).
-            - operational_events: list of associated operational event records (Contract 5).
-        """
+        """Inject calibrated anomalies into billing series."""
         df_out = df.copy()
         if not pd.api.types.is_datetime64_any_dtype(df_out[time_col]):
             df_out[time_col] = pd.to_datetime(df_out[time_col], utc=True)
@@ -89,7 +260,6 @@ class SyntheticInjector:
             svc_std = float(np.std(base_costs)) if len(base_costs) > 0 else 0.05
             effective_sigma = max(svc_std, svc_mean * 0.2, 0.05)
 
-            # Determine number of incidents to inject
             n_incidents = max(
                 1, int(n_points * self.injection_rate / self.min_duration_hours)
             )
@@ -122,14 +292,12 @@ class SyntheticInjector:
                 label_id = f"lbl_{uuid.uuid4().hex[:8]}"
                 event_id = f"evt_{uuid.uuid4().hex[:8]}"
 
-                # Inject cost surge
                 for idx in incident_indices:
                     orig_cost = df_out.loc[idx, cost_col]
                     spike = orig_cost * (1.0 + alpha) + (beta * effective_sigma)
                     df_out.loc[idx, cost_col] = float(spike)
                     df_out.loc[idx, "is_anomaly"] = 1
 
-                # Record ground truth anomaly label (Contract 6)
                 anomaly_labels.append(
                     {
                         "label_id": label_id,
@@ -144,7 +312,6 @@ class SyntheticInjector:
                     }
                 )
 
-                # Record corresponding operational event (Contract 5)
                 operational_events.append(
                     {
                         "event_id": event_id,
@@ -158,7 +325,7 @@ class SyntheticInjector:
                     }
                 )
 
-            # Inject Decoy event (benign deployment without cost surge)
+            # Decoy event
             decoy_start_k = int(self.rng.integers(0, max(1, n_points - 2)))
             decoy_idx = svc_indices[decoy_start_k]
             decoy_time = df_out.loc[decoy_idx, time_col]

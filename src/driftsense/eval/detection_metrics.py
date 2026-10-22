@@ -1,10 +1,11 @@
-"""Anomaly detection evaluation metrics for DriftSense.
+"""Anomaly detection evaluation metrics for DriftSense v2.
 
-Implements point-level, event-level, and temporal detection delay metrics:
-- Point-level: Precision, Recall, F1-Score, False Positive Rate (FPR), Specificity.
-- Event-level (window-based): Anomaly event detected if any point in [t_start, t_end] is flagged.
-- Detection delay: Temporal latency from event onset to first triggered alert.
-- Regime-stratified False Positive analysis: FPR during normal diurnal periods vs workload shifts.
+Implements point-level, event-level, operational alert rate, and temporal latency metrics:
+- Point-level: Precision, Recall, F1-Score, PR-AUC, Specificity.
+- Event-level: True Positive Events, False Positive Events, Event-F1.
+- Detection latency: Delay from event onset to first triggered alert.
+- Operational metrics: Alerts per week, alerts per $1k of spend.
+- Presumed-normal alert rate: Alert frequency during presumed clean/seasonal intervals.
 """
 
 from __future__ import annotations
@@ -14,17 +15,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import auc, precision_recall_curve
 
 logger = logging.getLogger(__name__)
 
 
 def point_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, int]:
-    """Compute point-level confusion matrix components (TP, FP, TN, FN).
-
-    Args:
-        y_true: Binary ground-truth array (1 = anomaly, 0 = normal).
-        y_pred: Binary predicted labels array (1 = flagged, 0 = normal).
-    """
+    """Compute point-level confusion matrix components (TP, FP, TN, FN)."""
     yt = np.asarray(y_true, dtype=int)
     yp = np.asarray(y_pred, dtype=int)
 
@@ -57,11 +54,63 @@ def point_f1_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(2.0 * p * r / (p + r)) if (p + r) > 0 else 0.0
 
 
+def precision_recall_auc(y_true: np.ndarray, scores: np.ndarray) -> float:
+    """Compute Area Under the Precision-Recall Curve (PR-AUC)."""
+    yt = np.asarray(y_true, dtype=int)
+    sc = np.asarray(scores, dtype=float)
+    if np.sum(yt == 1) == 0:
+        return 0.0
+    precisions, recalls, _ = precision_recall_curve(yt, sc)
+    return float(auc(recalls, precisions))
+
+
 def false_positive_rate(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Compute False Positive Rate (FPR): FP / (FP + TN)."""
     cm = point_confusion_matrix(y_true, y_pred)
     denom = cm["fp"] + cm["tn"]
     return float(cm["fp"] / denom) if denom > 0 else 0.0
+
+
+def alerts_per_week(
+    y_pred: np.ndarray,
+    timestamps: list[Any] | pd.Series | np.ndarray,
+) -> float:
+    """Compute normalized alert frequency per 168 hours of monitored timeline."""
+    ts = pd.to_datetime(timestamps, utc=True)
+    if len(ts) < 2:
+        return float(np.sum(y_pred == 1))
+
+    total_hours = float(len(ts))
+    total_alerts = float(np.sum(y_pred == 1))
+    weeks = total_hours / 168.0
+    return float(total_alerts / weeks) if weeks > 0 else total_alerts
+
+
+def alerts_per_spend(
+    y_pred: np.ndarray,
+    actual_costs: np.ndarray,
+    unit_dollars: float = 1000.0,
+    eps: float = 1e-4,
+) -> float:
+    """Compute alert rate per unit dollars of monitored spend (default per $1,000)."""
+    yp = np.asarray(y_pred, dtype=int)
+    costs = np.asarray(actual_costs, dtype=float)
+
+    total_alerts = float(np.sum(yp == 1))
+    total_spend = float(np.sum(costs))
+    spend_units = (total_spend + eps) / unit_dollars
+    return float(total_alerts / spend_units)
+
+
+def presumed_normal_alert_rate(y_pred: np.ndarray) -> float:
+    """Compute alert rate over presumed normal periods (fraction of steps flagged).
+
+    Reported explicitly as 'alert rate on presumed-normal data', NOT as FPR.
+    """
+    yp = np.asarray(y_pred, dtype=int)
+    if len(yp) == 0:
+        return 0.0
+    return float(np.mean(yp == 1))
 
 
 def point_level_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -94,19 +143,12 @@ def event_level_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
 ) -> dict[str, Any]:
-    """Compute event-level (window-based) anomaly detection metrics and detection delay.
-
-    An anomaly event is a contiguous segment of points where y_true == 1.
-    - True Positive Event (TPE): An event where at least one alarm (y_pred == 1) occurs within its span.
-    - False Negative Event (FNE): An event where no alarm occurs within its span.
-    - False Positive Event (FPE): A contiguous block of alarms (y_pred == 1) occurring entirely outside any true event.
-    - Detection Delay: Time difference between event onset and first triggered alert.
-    """
+    """Compute event-level (window-based) anomaly detection metrics and detection delay."""
     ts = pd.to_datetime(timestamps, utc=True)
     yt = np.asarray(y_true, dtype=int)
     yp = np.asarray(y_pred, dtype=int)
 
-    # 1. Identify contiguous ground truth event windows
+    # Identify contiguous ground truth event windows
     events: list[dict[str, Any]] = []
     in_event = False
     start_idx = 0
@@ -135,7 +177,7 @@ def event_level_metrics(
             }
         )
 
-    # 2. Evaluate each ground truth event
+    # Evaluate each ground truth event
     detected_events = 0
     delays_seconds: list[float] = []
 
@@ -144,7 +186,6 @@ def event_level_metrics(
         ev_preds = yp[s_idx : e_idx + 1]
         if np.any(ev_preds == 1):
             detected_events += 1
-            # First alert within event
             first_alarm_rel_idx = int(np.argmax(ev_preds == 1))
             first_alarm_idx = s_idx + first_alarm_rel_idx
             delay = (ts[first_alarm_idx] - ev["start_time"]).total_seconds()
@@ -156,7 +197,6 @@ def event_level_metrics(
         float(detected_events / total_true_events) if total_true_events > 0 else 1.0
     )
 
-    # 3. Identify false positive event episodes (alarms outside ground truth)
     outside_mask = (yt == 0) & (yp == 1)
     fp_episodes = 0
     in_fp = False
@@ -210,7 +250,6 @@ def stratified_fp_analysis(
     yt = df_eval[y_true_col].to_numpy(dtype=int)
     yp = df_eval[y_pred_col].to_numpy(dtype=int)
 
-    # Normal periods (true negative opportunities)
     normal_mask = yt == 0
     total_normal = int(np.sum(normal_mask))
 
@@ -220,7 +259,6 @@ def stratified_fp_analysis(
     overall_fp = int(np.sum(normal_mask & (yp == 1)))
     overall_fpr = float(overall_fp / total_normal)
 
-    # Weekend vs Weekday FP analysis
     report: dict[str, Any] = {
         "total_normal_points": total_normal,
         "total_false_positives": overall_fp,

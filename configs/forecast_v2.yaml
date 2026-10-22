@@ -1,0 +1,78 @@
+# DriftSense v2 — Expected Cost Forecasting Configuration (Phase 6)
+# Governed by Rule C3, C6, and Phase 6 Acceptance Criteria
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # Rule C7: Holdout partition (data/splits/test_features.csv) is strictly quarantined
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+
+models:
+  seasonal_naive:
+    enabled: true
+    seasonality: 24
+  moving_average:
+    enabled: true
+    window: 24
+  ets:
+    enabled: true
+    alpha: 0.20
+    beta: 0.05
+    gamma: 0.10
+    seasonality: 24
+  sarima:
+    enabled: true
+    order: [1, 0, 0]
+    seasonal_order: [1, 0, 0, 24]
+  boosted_tree:
+    enabled: true
+    objective: "reg:tweedie"
+    tweedie_variance_power: 1.5
+    n_estimators: 120
+    max_depth: 4
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+  quantile:
+    enabled: true
+    quantiles: [0.10, 0.50, 0.90]
+    n_estimators: 80
+    max_depth: 4
+    learning_rate: 0.05
+
+conformal:
+  enabled: true
+  alphas: [0.05, 0.10, 0.20]
+  default_alpha: 0.10
+
+reconciliation:
+  enabled: true
+  method: "bottom_up"
+
+evaluation:
+  primary_metric: "wape"
+  tracked_metrics:
+    - "mae"
+    - "rmse"
+    - "wape"
+    - "smape"
+    - "mape"
+    - "mase"
+    - "pinball_loss"
+    - "coverage"
+    - "interval_width"
+    - "winkler_score"
+  mase_seasonality: 24
+
+output:
+  models_dir: "models/forecast"
+  metrics_path: "metrics/val_forecast_metrics_v2.json"
+  val_predictions_path: "data/predictions/val_forecast_predictions_v2.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_6"
+  stage: "forecasting"
+  holdout_touched: false

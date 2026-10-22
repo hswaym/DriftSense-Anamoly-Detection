@@ -1,0 +1,16 @@
+# DriftSense v2 — Ingestion Configuration: GCP Cloud Billing
+
+ingest:
+  provider: "gcp_billing"
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  input_path: "data/raw/gcp_sample.csv"
+  output_path: "data/processed/canonical_gcp.csv"
+  currency: "USD"
+  handle_refunds: "include"
+  dedup: "drop"
+
+quality:
+  data_path: "data/processed/canonical_gcp.csv"
+  report_out: "reports/quality_gcp.md"
+  json_out: "reports/quality_gcp.json"
+  fail_under: 75.0

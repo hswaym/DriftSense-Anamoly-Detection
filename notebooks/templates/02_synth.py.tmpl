@@ -1,0 +1,136 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 02: Adversarial Scenario Generation (Faults, Decoys, Confounders)
+#
+# **Runtime Type:** Python 3 (CPU)  
+# **Estimated Runtime:** ~2-3 minutes  
+# **RAM Needed:** ~2 GB  
+# **Disk Needed:** ~500 MB  
+# **Expected Outputs:**  
+# - Injected Billing Records: `data/scenarios/dev_billing.csv`  
+# - Candidate Operational Events: `data/scenarios/dev_events.csv`  
+# - Quarantined Ground Truth Labels: `data/scenarios/dev_labels.csv`  
+# - Run Manifest: `manifest.json`  
+#
+# This notebook is generated deterministically by `scripts/build_notebooks.py`. Hand edits will be overwritten.
+
+# %% [markdown]
+# ## 1. Setup & Environment Verification
+
+# %%
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+# Clone repo if in Google Colab environment
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo"):
+        os.chdir("repo")
+    else:
+        print("Cloning repository in Google Colab...")
+        subprocess.run(["git", "clone", "https://github.com/hswaym/DriftSense-Anamoly-Detection.git", "repo"], check=True)
+        os.chdir("repo")
+        subprocess.run(["git", "checkout", "v2-enterprise"], check=True)
+
+# Install package in editable mode
+subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."], check=True)
+
+# Ensure src directory is on sys.path for active Colab kernel
+src_dir = os.path.abspath("src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+print(f"Environment setup complete. Added {src_dir} to sys.path.")
+
+# %% [markdown]
+# ## 2. Hardware Diagnostic Check
+
+# %%
+from driftsense.runtime.hardware import check_hardware
+
+hw = check_hardware(requested_device="cpu")
+print("=== Hardware Diagnostic Summary ===")
+for k, v in hw.items():
+    print(f"{k:20}: {v}")
+
+# %% [markdown]
+# ## 3. Scenario Generation Execution
+
+# %%
+import os
+import sys
+from pathlib import Path
+import pandas as pd
+from driftsense.runtime.config import load_config
+from driftsense.synth.scenarios import ScenarioOrchestrator
+from driftsense.synth.labels import save_labels_csv, verify_label_isolation
+
+# Ensure working directory has src
+if "src" not in sys.path:
+    sys.path.insert(0, os.path.abspath("src"))
+
+CONFIG_PATH = "configs/synth_dev.yaml"
+cfg, config_sha256 = load_config(CONFIG_PATH)
+scen_cfg = cfg["scenario"]
+io_cfg = cfg["io"]
+
+print(f"Loading clean billing data from: {io_cfg['clean_input_path']}")
+clean_path = Path(io_cfg["clean_input_path"])
+if not clean_path.exists():
+    print(f"Dataset not found at {clean_path}. Auto-acquiring from repository...")
+    from driftsense.data.acquire import acquire_dataset
+    d_cfg, _ = load_config("configs/data_focus.yaml")
+    clean_path.parent.mkdir(parents=True, exist_ok=True)
+    acquire_dataset(
+        url=d_cfg["dataset"]["url"],
+        destination=str(clean_path),
+        expected_sha256=d_cfg["dataset"]["sha256"],
+        overwrite=False,
+    )
+
+df_clean = pd.read_csv(clean_path)
+
+orchestrator = ScenarioOrchestrator(
+    seed=scen_cfg["seeds"][0],
+    is_holdout=scen_cfg.get("is_holdout", False),
+    decoy_to_fault_ratio=scen_cfg.get("decoy_to_fault_ratio", 3.0),
+    min_faults_per_service=scen_cfg.get("min_faults_per_service", 1),
+    max_faults_per_service=scen_cfg.get("max_faults_per_service", 3),
+)
+
+df_injected, df_events, df_labels, manifest = orchestrator.generate_scenario(
+    df_clean=df_clean,
+    scenario_name=scen_cfg["name"],
+)
+
+# Verify zero leakage into billing features
+verify_label_isolation(list(df_injected.columns))
+print("PASS: Verified ground-truth labels are 100% isolated from billing records.")
+
+# Save outputs
+p_billing = Path(io_cfg["output_billing_path"])
+p_events = Path(io_cfg["output_events_path"])
+p_labels = Path(io_cfg["output_labels_path"])
+
+p_billing.parent.mkdir(parents=True, exist_ok=True)
+df_injected.to_csv(p_billing, index=False)
+df_events.to_csv(p_events, index=False)
+df_labels.to_csv(p_labels, index=False)
+
+print(f"Saved injected billing to: {p_billing} ({len(df_injected)} rows)")
+print(f"Saved candidate events to: {p_events} ({len(df_events)} events)")
+print(f"Saved ground truth labels to: {p_labels} ({len(df_labels)} incidents)")
+print(f"Decoy to Fault Ratio: {manifest['decoy_to_fault_ratio']} : 1")

@@ -1,0 +1,255 @@
+{
+  "H1": {
+    "verdict": "CONFIRMED",
+    "total_features": 45,
+    "feature_names": [
+      "BilledCost",
+      "ConsumedQuantity",
+      "ConsumedQuantity_diff_1h",
+      "ConsumedQuantity_diff_24h",
+      "ConsumedQuantity_growth_pct_1h",
+      "ConsumedQuantity_growth_pct_24h",
+      "ConsumedQuantity_lag_1",
+      "ConsumedQuantity_lag_2",
+      "ConsumedQuantity_lag_24",
+      "ConsumedQuantity_roll_mean_24h",
+      "ConsumedQuantity_roll_mean_6h",
+      "ConsumedQuantity_roll_std_24h",
+      "ConsumedQuantity_roll_std_6h",
+      "EffectiveCost_lag_1",
+      "EffectiveCost_lag_168",
+      "EffectiveCost_lag_2",
+      "EffectiveCost_lag_24",
+      "EffectiveCost_lag_3",
+      "EffectiveCost_roll_max_168h",
+      "EffectiveCost_roll_max_24h",
+      "EffectiveCost_roll_max_3h",
+      "EffectiveCost_roll_max_6h",
+      "EffectiveCost_roll_mean_168h",
+      "EffectiveCost_roll_mean_24h",
+      "EffectiveCost_roll_mean_3h",
+      "EffectiveCost_roll_mean_6h",
+      "EffectiveCost_roll_std_168h",
+      "EffectiveCost_roll_std_24h",
+      "EffectiveCost_roll_std_3h",
+      "EffectiveCost_roll_std_6h",
+      "cos_dow",
+      "cos_hour",
+      "day_of_month",
+      "day_of_week",
+      "event_active_batch",
+      "event_active_config_change",
+      "event_active_deployment",
+      "event_active_scaling",
+      "event_active_traffic",
+      "hour_of_day",
+      "hours_since_last_event",
+      "is_weekend",
+      "recent_event_count_24h",
+      "sin_dow",
+      "sin_hour"
+    ],
+    "cost_contemporaneous_detected": [
+      "BilledCost"
+    ],
+    "usage_contemporaneous_detected": [
+      "ConsumedQuantity",
+      "ConsumedQuantity_growth_pct_1h",
+      "ConsumedQuantity_growth_pct_24h"
+    ],
+    "shap_top_drivers": [
+      {
+        "rank": 1,
+        "feature": "BilledCost",
+        "mean_abs_shap": 0.009411451,
+        "relative_importance_pct": 48.17691,
+        "cumulative_importance_pct": 48.17691,
+        "native_gain": 0.19630705
+      },
+      {
+        "rank": 2,
+        "feature": "ConsumedQuantity",
+        "mean_abs_shap": 0.0016524495,
+        "relative_importance_pct": 8.458834,
+        "cumulative_importance_pct": 56.635742,
+        "native_gain": 0.022613501
+      },
+      {
+        "rank": 3,
+        "feature": "day_of_month",
+        "mean_abs_shap": 0.0007246881,
+        "relative_importance_pct": 3.7096546,
+        "cumulative_importance_pct": 60.345398,
+        "native_gain": 0.022533288
+      },
+      {
+        "rank": 4,
+        "feature": "EffectiveCost_roll_mean_168h",
+        "mean_abs_shap": 0.00072298286,
+        "relative_importance_pct": 3.7009254,
+        "cumulative_importance_pct": 64.046326,
+        "native_gain": 0.044410367
+      },
+      {
+        "rank": 5,
+        "feature": "EffectiveCost_roll_max_24h",
+        "mean_abs_shap": 0.00060912844,
+        "relative_importance_pct": 3.1181085,
+        "cumulative_importance_pct": 67.16444,
+        "native_gain": 0.038171183
+      },
+      {
+        "rank": 6,
+        "feature": "hour_of_day",
+        "mean_abs_shap": 0.0006056352,
+        "relative_importance_pct": 3.1002269,
+        "cumulative_importance_pct": 70.26466,
+        "native_gain": 0.013906437
+      },
+      {
+        "rank": 7,
+        "feature": "RecordCount",
+        "mean_abs_shap": 0.0005364381,
+        "relative_importance_pct": 2.7460089,
+        "cumulative_importance_pct": 73.01067,
+        "native_gain": 0.0070103277
+      },
+      {
+        "rank": 8,
+        "feature": "ConsumedQuantity_roll_mean_24h",
+        "mean_abs_shap": 0.00049884315,
+        "relative_importance_pct": 2.5535614,
+        "cumulative_importance_pct": 75.56423,
+        "native_gain": 0.054459028
+      },
+      {
+        "rank": 9,
+        "feature": "EffectiveCost_roll_mean_24h",
+        "mean_abs_shap": 0.00041176786,
+        "relative_importance_pct": 2.107826,
+        "cumulative_importance_pct": 77.67206,
+        "native_gain": 0.016842177
+      },
+      {
+        "rank": 10,
+        "feature": "EffectiveCost_roll_max_168h",
+        "mean_abs_shap": 0.0003187973,
+        "relative_importance_pct": 1.631913,
+        "cumulative_importance_pct": 79.30397,
+        "native_gain": 0.06293313
+      }
+    ]
+  },
+  "H2": {
+    "verdict": "CONFIRMED",
+    "forecast_target": "EffectiveCost",
+    "consumed_quantity_at_t_is_feature": true,
+    "residual_formula": "residual = EffectiveCost - expected_cost",
+    "threshold_formula": "residual > rolling_mean_24h + 3.0 * rolling_std_24h",
+    "implication": "Because ConsumedQuantity at time t is an unlagged input feature, the forecaster conditions on actual usage volume. If usage jumps 5x, the forecaster predicts a 5x cost increase. Therefore, residual e_t remains small and usage spikes are NOT flagged as anomalies. v1 detects rate/pricing/residual-inefficiency anomalies, not volume surges."
+  },
+  "H3": {
+    "verdict": "REFUTED",
+    "has_decoy_events": true,
+    "events_summary": {
+      "total_incidents": 47,
+      "classes": [
+        "AUTOSCALING_OVERPROVISION",
+        "CONFIG_MODIFICATION",
+        "DEPLOYMENT_DEFECT",
+        "EXTERNAL_TRAFFIC_SURGE",
+        "RUNAWAY_BATCH_PROCESS"
+      ],
+      "matrix": [
+        [
+          2,
+          0,
+          1,
+          0,
+          0
+        ],
+        [
+          0,
+          11,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          13,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          12,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          8
+        ]
+      ],
+      "per_class_recall": {
+        "AUTOSCALING_OVERPROVISION": 0.6666666666666666,
+        "CONFIG_MODIFICATION": 1.0,
+        "DEPLOYMENT_DEFECT": 1.0,
+        "EXTERNAL_TRAFFIC_SURGE": 1.0,
+        "RUNAWAY_BATCH_PROCESS": 1.0
+      },
+      "top_1_accuracy": 0.9787234042553191,
+      "mrr": 0.9893617021276596
+    },
+    "implication": "CONFIRMED: In v1, candidate operational events in D_test consist exclusively of the injected faults. No decoy events (events with no cost impact) or confounders exist in the event pool. Temporal correlation ranks candidate events purely by temporal proximity to the anomaly onset. Thus, 97.87% Top-1 accuracy largely measures identifying the nearest same-service injected event within 6h."
+  },
+  "H4": {
+    "verdict": "CONFIRMED",
+    "sample_deviations_in_narratives": [
+      {
+        "observed": 4.0,
+        "expected": 0.65,
+        "ratio": 6.153846153846153
+      },
+      {
+        "observed": 4.0,
+        "expected": 0.86,
+        "ratio": 4.651162790697675
+      },
+      {
+        "observed": 4.0,
+        "expected": 0.93,
+        "ratio": 4.301075268817204
+      }
+    ],
+    "implication": "CONFIRMED: Sample deviations in test narratives show cost spikes of +330% to +515% (e.g., $4.00 vs $0.65). These large, abrupt step injections explain the high event precision (90%), high recall (95.74%), and 0.00h detection delay. Gradual low-magnitude drift (<10%) was not evaluated."
+  },
+  "H5": {
+    "verdict": "CONFIRMED",
+    "topology": {},
+    "implication": "CONFIRMED: The test split D_test spans 6 full days (144 hours) across ~27 unique services (144 * 26.54 \u2248 3,822 rows). Clean track FPR (0.16%) was calculated on real un-injected billing data, which assumes real data has zero anomalies. If real data contains organic spikes, treating all alerts on real data as 'false alarms' is technically an unlabelled alert rate."
+  },
+  "H6": {
+    "verdict": "CONFIRMED",
+    "dataset_audit": {},
+    "implication": "CONFIRMED: focus_sample_10000.csv has 10,000 raw rows. When aggregated to 1h canonical grain, missing hours for each service are zero-imputed across the full 30-day timeline. The data represents FOCUS-Sample-Data from the FinOps Foundation repository."
+  },
+  "H7": {
+    "verdict": "CONFIRMED",
+    "findings_count": 1,
+    "occurrences": [
+      {
+        "file": "docs\\report\\01_executive_summary.md",
+        "line": 25,
+        "matched": "Industry avg"
+      }
+    ],
+    "implication": "CONFIRMED: Mentions of 'industry avg FPR ~5-10%' and 'unsupervised Point-F1 ~0.40' appear in docs/report/01_executive_summary.md and presentation_outline.md as contextual benchmarks. However, they lack specific DOI or academic literature citations in those tables. In v2, they must either cite specific papers (e.g. from docs/literature_review.md) or be removed."
+  }
+}

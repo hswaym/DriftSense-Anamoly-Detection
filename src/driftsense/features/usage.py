@@ -2,8 +2,11 @@
 
 Computes historical usage lags, consumption deltas, percentage growth,
 and rolling usage statistics.
-Enforces strict anti-leakage invariants:
-- Usage features at prediction time t utilize strictly historical measurements (< t).
+Supports two operational forecasting modes:
+- Mode A (history-expected): No contemporaneous usage features at time t.
+  All usage metrics reference historical measurements (< t). Detects usage-driven spikes.
+- Mode B (usage-expected): Adds contemporaneous usage (ConsumedQuantity at time t).
+  Detects rate / price / efficiency anomalies given observed consumption.
 """
 
 from __future__ import annotations
@@ -23,19 +26,20 @@ def add_usage_features(
     time_col: str = "ChargePeriodStart",
     lags: Sequence[int] = (1, 2, 24),
     rolling_windows: Sequence[int] = (6, 24),
+    include_contemporaneous: bool = False,
     eps: float = 1e-6,
 ) -> pd.DataFrame:
-    """Compute strictly historical resource usage features.
-
-    All usage features at time step t are computed using observations from < t.
+    """Compute resource usage features for Mode A or Mode B.
 
     Args:
         df: Input DataFrame.
         usage_col: Column containing consumed resource quantity.
         service_col: Column identifying time series panel.
         time_col: Timestamp column.
-        lags: Lag intervals to compute.
+        lags: Lag intervals to compute (all >= 1).
         rolling_windows: Rolling window sizes in hours.
+        include_contemporaneous: If True (Mode B), retains contemporaneous usage
+            at time t. If False (Mode A, default), uses strictly historical usage (< t).
         eps: Small epsilon to prevent division by zero in percentage growth.
 
     Returns:
@@ -51,7 +55,11 @@ def add_usage_features(
     df_out = df.sort_values(by=[service_col, time_col]).copy()
     usage_series = df_out.groupby(service_col)[usage_col]
 
-    # Historical usage lags
+    # Contemporaneous usage for Mode B
+    if include_contemporaneous:
+        df_out[f"{usage_col}_contemporaneous"] = df_out[usage_col]
+
+    # Historical usage lags (strictly >= 1)
     for lag in lags:
         if lag < 1:
             raise ValueError(f"Usage lag must be >= 1. Got lag={lag}")

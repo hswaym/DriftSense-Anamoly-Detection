@@ -1,0 +1,96 @@
+# DriftSense v2 — Multi-Layer Root-Cause Attribution Configuration (Phase 8)
+
+dataset:
+  train_path: "data/splits/train_features.csv"
+  val_path: "data/splits/val_features.csv"
+  # D_test is strictly quarantined and locked (C6, A8.4)
+  test_path: "data/splits/test_features.csv"
+  holdout_touched: false
+  target_col: "EffectiveCost"
+  time_col: "ChargePeriodStart"
+  service_col: "ServiceName"
+  quantity_col: "ConsumedQuantity"
+  cost_col: "BilledCost"
+
+taxonomy:
+  - "DEPLOYMENT_DEFECT"
+  - "AUTOSCALING_OVERPROVISION"
+  - "CONFIG_MODIFICATION"
+  - "EXTERNAL_TRAFFIC_SURGE"
+  - "ORPHANED_STORAGE_ACCUMULATION"
+  - "RUNAWAY_BATCH_PROCESS"
+
+decomposition:
+  dimensions:
+    - "ServiceName"
+    - "SubAccountId"
+    - "RegionId"
+    - "UsageType"
+  min_share_threshold: 0.05
+  price_volume_mix:
+    tolerance: 0.0001
+    verify_identity: true
+
+event_kernel:
+  lookback_hours: 24.0
+  half_life_hours: 6.0
+  service_match_multiplier: 2.5
+  global_multiplier: 1.0
+  unmatched_multiplier: 0.2
+  grace_period_hours: 0.5
+  kernel_type: "exponential"
+
+abstention:
+  enabled: true
+  min_confidence: 0.30
+  min_margin: 0.06
+  ambiguity_threshold: 0.55
+  min_evidence_items: 1
+  confidence_tiers:
+    high: 0.75
+    medium: 0.45
+    low: 0.00
+
+attributors:
+  random:
+    enabled: true
+    seed: 42
+  prior:
+    enabled: true
+  correlation:
+    enabled: true
+    lookback_hours: 4.0
+    decay_halflife_hours: 2.0
+    service_match_multiplier: 2.0
+  xgboost:
+    enabled: true
+    n_estimators: 100
+    max_depth: 4
+    learning_rate: 0.05
+    lookback_hours: 4.0
+    seed: 42
+  multilayer:
+    enabled: true
+    enable_learned_ranker: true
+    enable_abstention: true
+
+evaluation:
+  primary_metric: "top_1_accuracy"
+  top_k: 3
+  metrics:
+    - "top_1_accuracy"
+    - "top_3_accuracy"
+    - "mrr"
+    - "macro_f1"
+    - "expected_calibration_error"
+    - "abstention_metrics"
+
+output:
+  attributors_dir: "models/attribute"
+  metrics_path: "metrics/val_attribute_metrics.json"
+  val_attributions_path: "data/predictions/val_attributions.csv"
+
+runtime:
+  seed: 42
+  phase: "PHASE_8"
+  stage: "attribution_v2"

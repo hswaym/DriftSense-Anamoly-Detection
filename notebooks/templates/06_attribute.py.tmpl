@@ -42,7 +42,7 @@ import subprocess
 from pathlib import Path
 
 # Pinned repository commit SHA or branch for reproducibility
-PINNED_COMMIT_SHA = "main"
+PINNED_COMMIT_SHA = "v2-enterprise"
 REPO_URL = "https://github.com/hswaym/DriftSense-Anamoly-Detection.git"
 
 # Clone if running on fresh Colab runtime
@@ -108,7 +108,7 @@ from driftsense.data.acquire import acquire_dataset
 from driftsense.eval.splits import chronological_split
 from driftsense.features.builder import FeaturePipeline
 
-CONFIG_PATH = "configs/attribute_focus.yaml"
+CONFIG_PATH = "configs/attribute_v2.yaml" if os.path.exists("configs/attribute_v2.yaml") else "configs/attribute_focus.yaml"
 cfg, config_sha256 = load_config(CONFIG_PATH)
 
 dataset_cfg = cfg.get("dataset", {})
@@ -212,6 +212,7 @@ from driftsense.attribute.random_baseline import RandomAttributor
 from driftsense.attribute.prior_baseline import ClassPriorAttributor
 from driftsense.attribute.correlation import TemporalCorrelationAttributor
 from driftsense.attribute.xgb_attributor import XGBoostAttributor
+from driftsense.attribute.ranker import MultiLayerAttributor
 from driftsense.eval.attribution_metrics import (
     evaluate_attribution_suite,
     compute_taxonomy_confusion_matrix,
@@ -233,6 +234,12 @@ attributors = [
         lookback_hours=attr_cfg.get("xgboost", {}).get("lookback_hours", 4.0),
         seed=attr_cfg.get("xgboost", {}).get("seed", 42),
         config=attr_cfg.get("xgboost", {}),
+    ),
+    MultiLayerAttributor(
+        name="MultiLayerAttributor",
+        enable_learned_ranker=attr_cfg.get("multilayer", {}).get("enable_learned_ranker", True),
+        enable_abstention=attr_cfg.get("multilayer", {}).get("enable_abstention", True),
+        config=attr_cfg.get("multilayer", {}),
     ),
 ]
 

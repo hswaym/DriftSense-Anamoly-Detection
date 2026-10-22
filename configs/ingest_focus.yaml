@@ -1,0 +1,16 @@
+# DriftSense v2 — Ingestion Configuration: FOCUS Canonical
+
+ingest:
+  provider: "focus"
+  tenant_id: "00000000-0000-0000-0000-000000000000"
+  input_path: "data/raw/focus_sample_10000.csv"
+  output_path: "data/processed/canonical_focus.csv"
+  currency: "USD"
+  handle_refunds: "include"
+  dedup: "drop"
+
+quality:
+  data_path: "data/processed/canonical_focus.csv"
+  report_out: "reports/quality_focus.md"
+  json_out: "reports/quality_focus.json"
+  fail_under: 75.0
