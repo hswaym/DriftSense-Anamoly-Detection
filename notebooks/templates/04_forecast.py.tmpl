@@ -370,6 +370,7 @@ builder = ManifestBuilder(
     phase="PHASE_6",
     stage="forecasting",
     config_path=CONFIG_PATH,
+    config_sha256=config_sha256,
     seed=cfg.get("runtime", {}).get("seed", 42),
 )
 
