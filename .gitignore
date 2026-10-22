@@ -46,6 +46,7 @@ Thumbs.db
 # Secrets & Local Configs
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 
@@ -62,6 +63,8 @@ data/events/*
 !data/events/.gitkeep
 data/labels/*
 !data/labels/.gitkeep
+data/uploads/*
+!data/uploads/.gitkeep
 metrics/*
 !metrics/.gitkeep
 models/*
