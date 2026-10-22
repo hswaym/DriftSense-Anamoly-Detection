@@ -230,6 +230,7 @@ def event_level_metrics(
         "event_precision": event_precision,
         "event_recall": event_recall,
         "event_f1": event_f1,
+        "f1": event_f1,
         "mean_delay_seconds": mean_delay_sec,
         "mean_delay_hours": mean_delay_sec / 3600.0,
         "median_delay_seconds": median_delay_sec,
