@@ -79,3 +79,7 @@ runs/*
 # Generated Notebooks (built via scripts/build_notebooks.py)
 notebooks/generated/*
 !notebooks/generated/.gitkeep
+
+# Frontend build & packages
+frontend/node_modules/
+frontend/dist/
