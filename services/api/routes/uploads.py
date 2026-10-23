@@ -119,6 +119,27 @@ async def upload_billing_file(
     )
 
 
+@router.get("", response_model=list[UploadMetadata])
+def list_uploads(
+    tenant_id: str = Depends(get_current_tenant_id),
+):
+    """List all uploads scoped to authenticated tenant."""
+    records = db.list_uploads_for_tenant(tenant_id)
+    return [
+        UploadMetadata(
+            upload_id=rec["upload_id"],
+            tenant_id=tenant_id,
+            filename=rec["filename"],
+            file_size_bytes=rec["file_size_bytes"],
+            detected_provider=rec["detected_provider"],
+            row_count_estimate=rec["row_count_estimate"],
+            column_names=rec["column_names"],
+            suggested_mapping=rec.get("column_mapping", {}),
+        )
+        for rec in records
+    ]
+
+
 @router.get("/{upload_id}", response_model=UploadMetadata)
 def get_upload_metadata(
     upload_id: str,

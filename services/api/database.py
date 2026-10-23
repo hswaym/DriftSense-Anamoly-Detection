@@ -80,6 +80,10 @@ class Database:
                 return dict(record)
         return None
 
+    def list_uploads_for_tenant(self, tenant_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(rec) for rec in self.uploads.values() if rec.get("tenant_id") == tenant_id]
+
     def update_column_mapping(
         self, upload_id: str, tenant_id: str, mapping: dict[str, str]
     ) -> bool:

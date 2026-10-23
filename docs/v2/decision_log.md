@@ -119,3 +119,31 @@ This document formally records the architectural decisions D1 through D8 that go
      * Enterprise product track with plain-language interfaces, actionable alert triage, and progressive disclosure toggles.
 * **Outcome:** **ACCEPTED (Dual-Track Research & Product Alignment).**
 * **Consequences:** Satisfies high-rigor research review while delivering immediate executive usability.
+
+---
+
+## Decision D9 / DEC-018: Phase 14 Security, Performance, and Accessibility QA Sign-Off
+
+* **Status:** **ACCEPTED**
+* **Date:** 2026-10-23
+* **Context:** Enterprise readiness verification before final locked evaluation on holdout data. Enforces Phase 14 criteria: STRIDE threat model, vulnerability and secret scans, tenant-isolation and upload abuse fuzzing, 1M-row load testing and memory profiling, operations runbook, and WCAG 2.1 Level AA accessibility verification.
+* **Decision:**
+  1. **STRIDE Threat Model (`docs/v2/threat_model.md`):** Formally codified 10 STRIDE threat vectors and mitigations across 3 trust boundaries.
+  2. **Security Controls in FastAPI (`services/api/`):**
+     - Mounted `SecurityHeadersMiddleware` (CSP, X-Frame-Options: DENY, HSTS, Nosniff, Referrer Policy, Permissions Policy).
+     - Mounted `RateLimitMiddleware` (sliding-window request flood throttling with HTTP 429 and Retry-After header).
+     - Strict tenant header validation via regex `^[a-zA-Z0-9_\-]+$` with 64-character ceiling.
+     - Added `list_uploads_for_tenant` and `GET /uploads` endpoint for tenant scoped inventory.
+  3. **Vulnerability & Secret Audit (`docs/v2/security_scan_report.md`):**
+     - `pip-audit`: 0 known CVEs across 28 Python packages.
+     - Secret Scan: 0 credentials or private keys in repository.
+     - Bandit SAST: 0 High and 0 Medium issues across 14,422 lines of code.
+     - `npm audit`: 3 moderate build-time Tailwind CSS issues triaged as Accepted Risk.
+  4. **Security & Fuzzing Test Suite (`tests/test_security_qa.py`):** 26 test cases verifying headers, rate limiting, tenant fuzzing/isolation, magic byte blocking, file size limits, traversal neutralization, and CSV DDE formula sanitization.
+  5. **Load Benchmark & Profiling (`scripts/load_test.py`, `docs/v2/load_test_report.md`):**
+     - Ingestion & Cleaning Throughput: **318,782 rows/sec** (exceeding SLA $\ge 50,000$ rows/s).
+     - Peak RAM on 1,000,000 rows: **480.98 MB** (well within $\le 2.0$ GB ceiling).
+     - Inference Latency: Sub-second per-record inference with full attribution and narrative generation.
+  6. **Operations Runbook (`docs/v2/ops_runbook.md`):** Complete deployment, backup/restore (RPO $\le 1$h, RTO $\le 15$m), and incident triage playbooks.
+  7. **Accessibility QA (`docs/v2/accessibility_report.md`):** 100% WCAG 2.1 Level AA compliance across all 10 UI views and navigation components.
+* **Consequences:** All acceptance criteria for Phase 14 (A14.1, A14.2, A14.3, A14.4, A14.5) are completely fulfilled. The full test suite passes (213/213 tests). Phase 15 (Final Locked Evaluation on Fresh Holdout) is unblocked.

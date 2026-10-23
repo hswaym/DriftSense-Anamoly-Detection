@@ -17,6 +17,7 @@ from fastapi import Header, HTTPException, status
 
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 ALLOWED_EXTENSIONS = {".csv", ".parquet"}
+MAX_TENANT_ID_LENGTH = 64
 
 # Common binary executable magic bytes to block
 DISALLOWED_MAGIC_BYTES = [
@@ -26,6 +27,48 @@ DISALLOWED_MAGIC_BYTES = [
     b"\xfe\xed\xfa\xce",  # Mach-O binary
     b"PK\x03\x04",  # ZIP/JAR archive (unless explicitly supported)
 ]
+
+
+class InMemoryRateLimiter:
+    """Thread-safe sliding-window rate limiter per client/tenant."""
+
+    def __init__(self, max_requests: int = 120, window_seconds: int = 60) -> None:
+        import threading
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._lock = threading.Lock()
+        self._records: dict[str, list[float]] = {}
+
+    def check(self, key: str) -> tuple[bool, int]:
+        """Check if request is permitted. Returns (is_allowed, retry_after_seconds)."""
+        import time
+        now = time.time()
+        cutoff = now - self.window_seconds
+
+        with self._lock:
+            timestamps = self._records.setdefault(key, [])
+            # Prune expired timestamps
+            valid = [t for t in timestamps if t > cutoff]
+            self._records[key] = valid
+
+            if len(valid) >= self.max_requests:
+                earliest = valid[0]
+                retry_after = max(1, int(earliest + self.window_seconds - now))
+                return False, retry_after
+
+            valid.append(now)
+            return True, 0
+
+    def reset(self) -> None:
+        """Clear rate limit records (useful for test isolation)."""
+        with self._lock:
+            self._records.clear()
+
+
+rate_limiter = InMemoryRateLimiter(
+    max_requests=int(os.environ.get("DRIFTSENSE_RATE_LIMIT_MAX", "120")),
+    window_seconds=int(os.environ.get("DRIFTSENSE_RATE_LIMIT_WINDOW", "60")),
+)
 
 
 def get_current_tenant_id(
@@ -40,13 +83,17 @@ def get_current_tenant_id(
     In production mode, raises 401 if missing.
     """
     if x_tenant_id:
-        clean_tenant = re.sub(r"[^a-zA-Z0-9_\-]", "", x_tenant_id)
-        if not clean_tenant:
+        if len(x_tenant_id) > MAX_TENANT_ID_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"X-Tenant-ID exceeds maximum length of {MAX_TENANT_ID_LENGTH} characters.",
+            )
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", x_tenant_id):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid X-Tenant-ID format.",
             )
-        return clean_tenant
+        return x_tenant_id
 
     # Dev fallback mode
     dev_tenant = os.environ.get("DRIFTSENSE_DEFAULT_TENANT", "tenant_demo")
