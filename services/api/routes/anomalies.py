@@ -94,6 +94,10 @@ def submit_anomaly_feedback(
             detail=f"Invalid feedback '{body.feedback}'. Must be one of {allowed}",
         )
 
+    anom = db.get_anomaly(anomaly_id, tenant_id)
+    if not anom:
+        raise HTTPException(status_code=404, detail="Anomaly not found.")
+
     success = db.update_anomaly_feedback(
         anomaly_id=anomaly_id,
         tenant_id=tenant_id,
@@ -102,6 +106,18 @@ def submit_anomaly_feedback(
     )
     if not success:
         raise HTTPException(status_code=404, detail="Anomaly not found.")
+
+    from driftsense.monitor.feedback_store import feedback_store
+    feedback_store.record_feedback(
+        anomaly_id=anomaly_id,
+        analysis_id=anom.get("analysis_id", "anl_unknown"),
+        tenant_id=tenant_id,
+        service_name=anom.get("service_name", "UNKNOWN"),
+        severity=anom.get("severity", "Medium"),
+        timestamp_alert=anom.get("timestamp", ""),
+        feedback_label=upper_fb,
+        notes=body.notes,
+    )
 
     return {
         "status": "SUCCESS",

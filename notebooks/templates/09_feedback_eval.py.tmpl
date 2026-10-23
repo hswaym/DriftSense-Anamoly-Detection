@@ -1,0 +1,192 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense — 09: Feedback Loop & Model Drift Monitoring (Phase 13)
+#
+# **Runtime Type:** Python 3 (CPU)  
+# **Estimated Runtime:** ~1-2 minutes  
+# **Expected Outputs:**  
+# - Feedback Metrics Summary: `runs/<run_id>/feedback_metrics.json`  
+# - Synthetic Drift Test Report: `runs/<run_id>/drift_report.json`  
+# - Model Registry Audit: `runs/<run_id>/registry_audit.json`  
+# - Manifest: `runs/<run_id>/manifest.json`  
+#
+# > **CRITICAL INVARIANTS (Phase 13):**  
+# > - **A13.1 Human Feedback Segregation:** Human feedback is treated as a separate validation set and is never mixed into synthetic training partitions.  
+# > - **A13.4 Anti-Online-Retraining:** Models are NEVER retrained automatically online in production. Retraining requires explicit offline protocols and gates.
+
+# %% [markdown]
+# ## 1. Setup & Environment Verification
+
+# %%
+import os
+import sys
+import json
+import numpy as np
+import pandas as pd
+from pathlib import Path
+
+# Verify DriftSense package
+try:
+    import driftsense
+    print(f"DriftSense version: {driftsense.__version__}")
+except ImportError:
+    print("DriftSense not in path, installing in editable mode...")
+    get_ipython().system("pip install -q -e .")
+    import driftsense
+
+from driftsense.monitor.feedback_store import FeedbackStore, feedback_store
+from driftsense.monitor.feedback_metrics import compute_feedback_metrics
+from driftsense.monitor.data_drift import SchemaDriftMonitor, VolumeDriftMonitor
+from driftsense.monitor.alert_volume import AlertVolumeMonitor
+from driftsense.monitor.registry import ModelRegistry, model_registry
+
+print("Phase 13 monitoring modules successfully imported.")
+
+# %% [markdown]
+# ## 2. Simulated Feedback Batch & Metrics Audit
+
+# %%
+# Clear and seed realistic multi-cloud feedback logs
+feedback_store.clear()
+
+sample_feedbacks = [
+    ("anom_01", "AmazonEC2", "Critical", "2026-03-14T03:00:00Z", "USEFUL", "Confirmed spot failover", 450),
+    ("anom_02", "AmazonRDS", "High", "2026-03-14T11:00:00Z", "USEFUL", "Unplanned ETL query run", 1200),
+    ("anom_03", "AmazonS3", "Medium", "2026-03-15T08:00:00Z", "PLANNED", "Scheduled monthly backup snapshot", 3600),
+    ("anom_04", "AmazonEC2", "Low", "2026-03-15T19:00:00Z", "NOT_AN_ISSUE", "Normal weekend variation", 900),
+    ("anom_05", "AmazonEC2", "Critical", "2026-03-16T02:00:00Z", "USEFUL", "Worker node leak", 320),
+]
+
+for anom_id, svc, sev, ts, label, notes, ack_sec in sample_feedbacks:
+    r = feedback_store.record_feedback(
+        anomaly_id=anom_id,
+        analysis_id="anl_eval_01",
+        tenant_id="tenant_prod",
+        service_name=svc,
+        severity=sev,
+        timestamp_alert=ts,
+        feedback_label=label,
+        notes=notes,
+    )
+    r.time_to_acknowledge_seconds = ack_sec
+
+records = feedback_store.get_records(tenant_id="tenant_prod")
+metrics_report = compute_feedback_metrics(records)
+
+print("Feedback Metrics Computed:")
+print(f"Total Feedback Count: {metrics_report.total_feedback_count}")
+print(f"Alert Usefulness Rate: {metrics_report.usefulness_rate_pct}%")
+print(f"Dismissal Rate: {metrics_report.dismissal_rate_pct}%")
+print(f"Planned Maintenance Rate: {metrics_report.planned_rate_pct}%")
+print(f"Median Acknowledge Latency: {metrics_report.median_acknowledge_latency_seconds}s")
+print(f"Dismissal by Severity: {metrics_report.dismissal_rate_by_severity}")
+print(f"\nExecutive Summary:\n{metrics_report.executive_summary}")
+
+assert metrics_report.usefulness_rate_pct == 60.0
+assert metrics_report.dismissal_rate_pct == 20.0
+print("Feedback audit assertions PASSED.")
+
+# %% [markdown]
+# ## 3. Synthetic Data Drift & Alert Volume Stress Testing
+
+# %%
+# 1. Schema Drift Test
+schema_monitor = SchemaDriftMonitor()
+
+# Valid FOCUS dataset
+df_valid = pd.DataFrame({
+    "ChargePeriodStart": ["2026-03-14T00:00:00Z"],
+    "ServiceName": ["AmazonEC2"],
+    "EffectiveCost": [150.0],
+    "BilledCost": [150.0],
+})
+rep_valid = schema_monitor.inspect_schema(df_valid)
+assert not rep_valid.is_drift_detected, "Valid FOCUS schema should not drift"
+
+# Drifting dataset with missing ChargePeriodStart
+df_drifted = pd.DataFrame({
+    "Cost": [150.0],
+    "Service": ["AmazonEC2"],
+})
+rep_drift = schema_monitor.inspect_schema(df_drifted)
+assert rep_drift.is_drift_detected
+print(f"Schema drift correctly caught: {rep_drift.warnings}")
+
+# 2. Volume & Distribution Drift Test
+vol_monitor = VolumeDriftMonitor()
+baseline = np.random.normal(loc=100.0, scale=15.0, size=500)
+# Shifted distribution
+shifted = np.random.normal(loc=250.0, scale=40.0, size=500)
+
+v_report = vol_monitor.inspect_volume(shifted, baseline)
+assert v_report.is_drift_detected
+print(f"Volume drift correctly caught: {v_report.warnings}")
+
+# 3. Alert Volume Storm Test
+alert_monitor = AlertVolumeMonitor(alert_fatigue_multiplier=3.0)
+storm_report = alert_monitor.inspect_alert_volume(current_window_count=35, historical_window_counts=[5, 6, 4, 7, 5])
+assert storm_report.is_alert_storm_detected
+print(f"Alert storm fatigue correctly caught: {storm_report.actionable_warning}")
+
+# %% [markdown]
+# ## 4. Model Registry & Anti-Retraining Invariant Verification (A13.4)
+
+# %%
+# Verify integrity of frozen champion models
+reg = ModelRegistry()
+assert reg.verify_integrity(), "Model registry integrity verification failed"
+print(f"Registered Models: {list(reg.models.keys())}")
+
+# Verify Anti-Online-Retraining Invariant
+try:
+    reg.guard_against_online_retraining(allow_explicit_flag=False)
+    raise AssertionError("Security Failure: Online retraining should have been blocked!")
+except RuntimeError as e:
+    print(f"A13.4 Retraining Guard Verified: {e}")
+
+# %% [markdown]
+# ## 5. Export Run Artifacts & Cryptographic Manifest
+
+# %%
+run_dir = Path("runs/run_phase13_feedback_monitor")
+run_dir.mkdir(parents=True, exist_ok=True)
+
+with open(run_dir / "feedback_metrics.json", "w") as f:
+    json.dump(metrics_report.to_dict(), f, indent=2)
+
+with open(run_dir / "drift_report.json", "w") as f:
+    json.dump({
+        "schema_drift": rep_drift.to_dict(),
+        "volume_drift": v_report.to_dict(),
+        "alert_volume": storm_report.to_dict(),
+    }, f, indent=2)
+
+with open(run_dir / "registry_audit.json", "w") as f:
+    json.dump({m_id: c.to_dict() for m_id, c in reg.models.items()}, f, indent=2)
+
+manifest = {
+    "run_id": "run_phase13_feedback_monitor",
+    "phase": 13,
+    "status": "SUCCESS",
+    "feedback_records_audited": len(records),
+    "anti_online_retraining_enforced": True,
+    "models_verified": list(reg.models.keys()),
+}
+
+with open(run_dir / "manifest.json", "w") as f:
+    json.dump(manifest, f, indent=2)
+
+print("Phase 13 run artifacts generated successfully.")
+print(json.dumps(manifest, indent=2))

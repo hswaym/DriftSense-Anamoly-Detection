@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from services.api.routes.admin import router as admin_router
 from services.api.routes.analyses import router as analyses_router
 from services.api.routes.anomalies import router as anomalies_router
 from services.api.routes.events import router as events_router
@@ -42,6 +43,7 @@ app.include_router(analyses_router)
 app.include_router(anomalies_router)
 app.include_router(events_router)
 app.include_router(reports_router)
+app.include_router(admin_router)
 
 
 @app.get("/health", tags=["Health"])

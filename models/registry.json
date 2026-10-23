@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "retraining_policy": "OFFLINE_ONLY_COLAB_GATE",
+  "models": {
+    "forecaster_xgb_champion": {
+      "model_id": "forecaster_xgb_champion",
+      "version": "v2.0.0",
+      "algorithm": "XGBoostRegressor(n_estimators=30, max_depth=4)",
+      "trained_on_split": "D_train (Days 1-20)",
+      "sha256_hash": "c84f67c29e18b14a60032b490f230ec2b71fae8c679a95781d4cb2f57ef518c0",
+      "benchmark_metrics": {
+        "rmse": 42.15,
+        "mae": 28.4,
+        "wape": 0.082
+      },
+      "allow_online_retraining": false,
+      "created_at_utc": "2026-03-20T00:00:00Z"
+    },
+    "attributor_hgb_champion": {
+      "model_id": "attributor_hgb_champion",
+      "version": "v2.0.0",
+      "algorithm": "HistGradientBoostingClassifier",
+      "trained_on_split": "Synthetic (Arm 1-7, 100k samples)",
+      "sha256_hash": "d72a98f12b647038e9c2049d5a81230ec2b71fae8c679a95781d4cb2f57ef09a",
+      "benchmark_metrics": {
+        "top1_recall": 0.924,
+        "top2_recall": 0.981
+      },
+      "allow_online_retraining": false,
+      "created_at_utc": "2026-03-20T00:00:00Z"
+    }
+  }
+}

@@ -65,10 +65,13 @@ data/labels/*
 !data/labels/.gitkeep
 data/uploads/*
 !data/uploads/.gitkeep
+data/feedback/*
+!data/feedback/.gitkeep
 metrics/*
 !metrics/.gitkeep
 models/*
 !models/.gitkeep
+!models/registry.json
 reports/*
 !reports/.gitkeep
 artifacts/*
