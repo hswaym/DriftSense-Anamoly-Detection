@@ -1,0 +1,51 @@
+{
+  "artifacts": [
+    {
+      "bytes": 4435,
+      "path": "C:/Users/hsway/OneDrive/Desktop/Everything/College Projects/DS courseproject/runs/run_phase15_holdout/holdout_results.json",
+      "sha256": "a6e6cd22753b858e6a0cdbd2cc1ea09c6f7d2a08b15a3ec57d875d56e55e7dc3"
+    },
+    {
+      "bytes": 295501,
+      "path": "C:/Users/hsway/OneDrive/Desktop/Everything/College Projects/DS courseproject/runs/run_phase15_holdout/holdout_predictions.csv",
+      "sha256": "8e1ae4aca657aead68384b13a5efb96c213c0b250e763a42f5e2854dbc03172f"
+    },
+    {
+      "bytes": 2986,
+      "path": "C:/Users/hsway/OneDrive/Desktop/Everything/College Projects/DS courseproject/runs/run_phase15_holdout/holdout_results_tables.md",
+      "sha256": "9f176df1ea097840e7339efca50934da0f8d1682d8f5fbd279ef61c1fafdcbb2"
+    }
+  ],
+  "config_path": "configs/synth_holdout.yaml",
+  "config_sha256": "cf35d117146cf7ec1db61c8a49da66a3039dcb3baeec608a5eefa182f08930a8",
+  "dataset_ids": [],
+  "dataset_sha256": {},
+  "finished_utc": "2026-10-23T19:16:36.112703+00:00",
+  "git_commit": "c83c27029581aef10407826c66b6ecfa02aa729f",
+  "git_dirty": true,
+  "hardware": {
+    "cpu": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "gpu": null,
+    "ram_gb": 15.47
+  },
+  "holdout_touched": true,
+  "metrics_files": [],
+  "packages": {
+    "lightgbm": "4.7.0",
+    "numpy": "2.5.4",
+    "pandas": "3.0.6",
+    "psutil": "7.2.2",
+    "pydantic": "2.14.1",
+    "pyyaml": "6.0.3",
+    "requests": "2.34.2",
+    "scikit-learn": "1.9.1",
+    "shap": "0.54.1",
+    "xgboost": "3.4.1"
+  },
+  "phase": "PHASE_15",
+  "python": "3.13.2",
+  "run_id": "phase15_holdout_20261024_004635",
+  "seed": 707,
+  "stage": "final_locked_evaluation",
+  "started_utc": "2026-10-23T19:16:35.790778+00:00"
+}

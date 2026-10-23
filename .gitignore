@@ -78,6 +78,8 @@ artifacts/*
 !artifacts/.gitkeep
 runs/*
 !runs/.gitkeep
+!runs/run_phase15_holdout/
+!runs/run_phase15_holdout/*
 
 # Generated Notebooks (built via scripts/build_notebooks.py)
 notebooks/generated/*

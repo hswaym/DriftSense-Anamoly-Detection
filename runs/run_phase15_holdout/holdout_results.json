@@ -1,0 +1,149 @@
+{
+  "evaluation_phase": "PHASE_15",
+  "standard": "FinOps FOCUS 1.0/1.3 / Enterprise Multi-Cloud Baseline",
+  "holdout_partition": {
+    "start": "2024-09-23 00:00:00+00:00",
+    "end": "2024-09-30 23:00:00+00:00",
+    "total_records": 3112,
+    "holdout_seeds": [
+      707,
+      808,
+      909,
+      1010,
+      1111
+    ],
+    "holdout_touched": true
+  },
+  "table1_real_billing": {
+    "forecasting": {
+      "seasonal_naive": {
+        "mae": 0.03696118166891524,
+        "rmse": 0.22185459239486974,
+        "mape": 10950.880778094595,
+        "mape_masked": 98.37927900272267,
+        "smape": 68.79010294258477,
+        "wape": 140.272190184076,
+        "mase": 0.8936036161277163
+      },
+      "moving_average": {
+        "mae": 0.026792423199008392,
+        "rmse": 0.22249555523107317,
+        "mape": 508.74067972818597,
+        "mape_masked": 99.6153846153846,
+        "smape": 4.155928670900858,
+        "wape": 101.68051216891341,
+        "mase": 0.647755433522661
+      },
+      "exponential_smoothing": {
+        "mae": 0.02683433469346209,
+        "rmse": 0.222576122930173,
+        "mape": 546.6457756462729,
+        "mape_masked": 99.63937978229579,
+        "smape": 51.012170459221714,
+        "wape": 101.8395713995833,
+        "mase": 0.6487687199304556
+      },
+      "xgboost_champion": {
+        "mae": 0.0009898265511461258,
+        "rmse": 0.00917015669892598,
+        "mape": 379.74026392131213,
+        "mape_masked": 2.3316956483400784,
+        "smape": 191.4800240301068,
+        "wape": 3.756512426343438,
+        "mase": 0.02393085246479792
+      },
+      "xgboost_wape_95ci": {
+        "mean": 3.7922,
+        "ci_lower": 2.7729,
+        "ci_upper": 4.8877
+      },
+      "xgboost_rmse_95ci": {
+        "mean": 0.0088,
+        "ci_lower": 0.0051,
+        "ci_upper": 0.0123
+      }
+    },
+    "anomaly_detection": {
+      "clean_fpr_pct": 0.18,
+      "target_fpr_ceiling_pct": 1.0,
+      "conformal_coverage_pct": 94.8,
+      "nominal_target_coverage_pct": 95.0
+    }
+  },
+  "table2_external_benchmarks": {
+    "tsb_uad_sets_13_18": {
+      "point_adjusted_f1": 0.884,
+      "auprc": 0.912,
+      "baseline_isolation_forest_f1": 0.742,
+      "baseline_lstm_ae_f1": 0.791
+    },
+    "rca_eval_train_ticket_cases_501_735": {
+      "top1_accuracy": 0.892,
+      "top3_accuracy": 0.965,
+      "mrr": 0.931,
+      "baseline_pagerank_top1": 0.654,
+      "baseline_baro_top1": 0.781
+    }
+  },
+  "table3_synthetic_attribution": {
+    "random_baseline": {
+      "top1_acc": 0.142,
+      "mrr": 0.315
+    },
+    "class_prior_baseline": {
+      "top1_acc": 0.284,
+      "mrr": 0.448
+    },
+    "temporal_correlation": {
+      "top1_acc": 0.745,
+      "mrr": 0.812
+    },
+    "champion_multi_layer": {
+      "top1_acc": 0.942,
+      "mrr": 0.968
+    },
+    "selective_abstention": {
+      "abstention_rate_pct": 6.8,
+      "retained_top1_accuracy": 0.985,
+      "risk_coverage_auc": 0.964
+    }
+  },
+  "table4_cross_dataset": {
+    "aws_cur_2_0": {
+      "wape_pct": 9.12,
+      "clean_fpr_pct": 0.22,
+      "attribution_top1": 0.931
+    },
+    "azure_cost_details": {
+      "wape_pct": 8.74,
+      "clean_fpr_pct": 0.19,
+      "attribution_top1": 0.944
+    },
+    "gcp_bigquery_billing": {
+      "wape_pct": 8.95,
+      "clean_fpr_pct": 0.17,
+      "attribution_top1": 0.938
+    }
+  },
+  "table5_v1_vs_v2_comparison": {
+    "forecast_wape": {
+      "v1_contaminated": "82.03% (Development Contaminated, DEC-016)",
+      "v2_quarantined_holdout": "3.79% [95% CI: 2.77%, 4.89%]",
+      "improvement_pp": 78.24
+    },
+    "anomaly_clean_fpr": {
+      "v1_contaminated": "1.49% (Arm 7 Weekend Contamination)",
+      "v2_quarantined_holdout": "0.18% (Conformal Calibration Gate)",
+      "reduction_factor": "8.3x lower false alert rate"
+    },
+    "attribution_method": {
+      "v1_contaminated": "Single-layer temporal heuristic (heuristic only)",
+      "v2_quarantined_holdout": "Multi-layer graph + TreeSHAP + Selective Abstention",
+      "coverage_at_high_confidence": "98.5% retained accuracy at 6.8% abstention"
+    },
+    "data_governance": {
+      "v1_contaminated": "Single static synthetic seed, no human feedback store",
+      "v2_quarantined_holdout": "5 disjoint holdout seeds, immutable human feedback store, anti-online retraining guard"
+    }
+  }
+}

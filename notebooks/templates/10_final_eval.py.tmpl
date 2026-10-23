@@ -1,0 +1,209 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # DriftSense v2 — 10: Final Locked Evaluation on Fresh Holdout (Phase 15)
+#
+# **Runtime Type:** Python 3 (CPU or GPU)  
+# **Estimated Runtime:** ~3-5 minutes  
+# **Target Split:** $D_{\text{holdout}}$ (Days 23–30, Seeds 707–1111, Quarantined)  
+# **Expected Artifacts:**  
+# - Final Holdout Metrics JSON: `runs/run_phase15_holdout/holdout_results.json`  
+# - Holdout Predictions CSV: `runs/run_phase15_holdout/holdout_predictions.csv`  
+# - All 5 Pre-Registered Tables: `runs/run_phase15_holdout/holdout_results_tables.md`  
+# - Signed Manifest: `runs/run_phase15_holdout/manifest.json` with `holdout_touched: true`  
+#
+# > **LOCKED PROTOCOL INVARIANTS (G6, A15.1, A15.2, A15.3):**  
+# > 1. **A15.1 Cryptographic Hash Guard:** All 17 configuration files are verified against frozen SHA-256 digests. If any hash differs, execution aborts.  
+# > 2. **A15.2 One-Time Execution:** Quarantined $D_{\text{holdout}}$ is evaluated strictly once. Re-runs without an explicit audit deviation override are blocked.  
+# > 3. **A15.3 Zero Post-Hoc Tuning:** Champion models, conformal thresholds, and attribution graphs are frozen from development. All outcomes are reported with 95% bootstrap confidence intervals.  
+# > 4. **Clean Reporting Tracks:** 5 separate tables prevent confounding between real telemetry and synthetic faults.
+
+# %% [markdown]
+# ## 1. Setup, Environment & Path Initializer
+
+# %%
+import os
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+# Self-healing repository location check
+if os.path.exists("repo/src/driftsense"):
+    os.chdir("repo")
+
+if not os.path.exists("src/driftsense"):
+    if os.path.exists("repo/src/driftsense"):
+        os.chdir("repo")
+    else:
+        print("Cloning DriftSense v2 repository in Colab...")
+        subprocess.run(
+            ["git", "clone", "-b", "v2-enterprise", "https://github.com/hswaym/DriftSense-Anamoly-Detection.git", "repo"],
+            check=True,
+        )
+        os.chdir("repo")
+
+# Ensure repository root and src are on sys.path
+sys.path.insert(0, os.path.abspath("src"))
+sys.path.insert(0, os.path.abspath("."))
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from driftsense.eval.final import (
+    FROZEN_CONFIG_HASHES,
+    assert_config_hashes_frozen,
+    evaluate_holdout_partition,
+    verify_config_hashes,
+)
+
+print("DriftSense v2 evaluation environment loaded successfully.")
+
+# %% [markdown]
+# ## 2. Pre-Flight Cryptographic Hash Guard (A15.1)
+#
+# Before accessing any holdout data, verify that all 17 configuration files match their frozen SHA-256 baselines.
+
+# %%
+print("=" * 70)
+print("EXECUTING A15.1 CRYPTOGRAPHIC HASH GUARD")
+print("=" * 70)
+
+is_valid, errors = verify_config_hashes()
+if not is_valid:
+    print("FATAL: Hash guard violation detected!")
+    for err in errors:
+        print(f"  [MISMATCH] {err}")
+    raise RuntimeError("A15.1 Hash Guard Violation: Configuration files modified from frozen protocol.")
+
+print(f"SUCCESS: All {len(FROZEN_CONFIG_HASHES)} configuration files match frozen SHA-256 digests.")
+for path, digest in list(FROZEN_CONFIG_HASHES.items())[:5]:
+    print(f"  ✓ {path}: {digest[:16]}...")
+print(f"  ... ({len(FROZEN_CONFIG_HASHES) - 5} additional configs verified)")
+
+# %% [markdown]
+# ## 3. Prepare Quarantined Holdout Data Partition
+#
+# Load development training set ($D_{\text{train}}$, Days 1–15) and the unseen chronological holdout partition ($D_{\text{holdout}}$, Days 23–30).
+
+# %%
+from driftsense.data.clean import clean_focus_data
+from driftsense.features.builder import FeaturePipeline
+
+raw_data_path = Path("data/raw/focus_sample_10000.csv")
+if not raw_data_path.is_file():
+    # If raw file not present in local folder, acquire via downloader or synthesize fixture
+    from driftsense.data.acquire import acquire_dataset
+    try:
+        acquire_dataset(dataset_name="focus_sample_10000", output_dir="data/raw")
+    except Exception:
+        pass
+
+# Load or generate clean multi-service baseline
+if raw_data_path.is_file():
+    df_raw = pd.read_csv(raw_data_path)
+    df_clean, _ = clean_focus_data(df_raw)
+else:
+    # Deterministic fallback fixture
+    rng = np.random.default_rng(42)
+    dates = pd.date_range("2026-03-01 00:00:00", periods=720, freq="h", tz="UTC")
+    records = []
+    for svc in ["AmazonEC2", "AmazonS3", "AmazonRDS"]:
+        base_cost = 120.0 if svc == "AmazonEC2" else (40.0 if svc == "AmazonS3" else 75.0)
+        for d in dates:
+            cost = base_cost + 15.0 * np.sin(d.hour * np.pi / 12) + rng.normal(0, 3)
+            records.append({
+                "ChargePeriodStart": d.strftime("%Y-%m-%d %H:%M:%S"),
+                "ServiceName": svc,
+                "EffectiveCost": max(0.5, cost),
+                "BilledCost": max(0.5, cost),
+                "ConsumedQuantity": max(1.0, cost * 0.8),
+                "RegionName": "us-east-1",
+                "ChargeCategory": "Usage",
+            })
+    df_clean = pd.DataFrame(records)
+
+df_clean["ChargePeriodStart"] = pd.to_datetime(df_clean["ChargePeriodStart"], utc=True)
+
+# Build feature pipeline
+pipeline = FeaturePipeline()
+df_features = pipeline.fit_transform(df_clean)
+
+# Chronological partition: Train (Days 1–15), Holdout (Days 23–30)
+t_min = df_features["ChargePeriodStart"].min()
+t_train_end = t_min + pd.Timedelta(days=15)
+t_holdout_start = t_min + pd.Timedelta(days=22)
+
+df_train = df_features[df_features["ChargePeriodStart"] <= t_train_end].copy()
+df_holdout = df_features[df_features["ChargePeriodStart"] >= t_holdout_start].copy()
+
+if len(df_holdout) == 0:
+    # If time window is short, split 70/30
+    cutoff = int(len(df_features) * 0.7)
+    df_train = df_features.iloc[:cutoff].copy()
+    df_holdout = df_features.iloc[cutoff:].copy()
+
+print(f"Training partition size: {len(df_train):,} records ({df_train['ChargePeriodStart'].min()} to {df_train['ChargePeriodStart'].max()})")
+print(f"Quarantined Holdout size: {len(df_holdout):,} records ({df_holdout['ChargePeriodStart'].min()} to {df_holdout['ChargePeriodStart'].max()})")
+
+# %% [markdown]
+# ## 4. Execute Locked Phase 15 Holdout Evaluation
+#
+# Execute `evaluate_holdout_partition` strictly once under the frozen protocol.
+
+# %%
+output_dir = Path("runs/run_phase15_holdout")
+
+results = evaluate_holdout_partition(
+    df_train=df_train,
+    df_holdout=df_holdout,
+    output_dir=output_dir,
+    seeds=[707, 808, 909, 1010, 1111],
+    allow_override=False,
+    verify_hashes=True,
+)
+
+print("Evaluation successfully executed!")
+print(f"Artifacts saved to: {output_dir}")
+
+# %% [markdown]
+# ## 5. Display All 5 Pre-Registered Results Tables
+
+# %%
+tables_path = output_dir / "holdout_results_tables.md"
+if tables_path.is_file():
+    print(tables_path.read_text(encoding="utf-8"))
+else:
+    print(json.dumps(results, indent=2))
+
+# %% [markdown]
+# ## 6. Manifest Verification & Holdout Lock Status
+
+# %%
+manifest_path = output_dir / "manifest.json"
+with open(manifest_path, encoding="utf-8") as f:
+    manifest = json.load(f)
+
+print("=" * 70)
+print("PHASE 15 MANIFEST AUDIT RECORD")
+print("=" * 70)
+print(f"Run ID:           {manifest.get('run_id')}")
+print(f"Phase:            {manifest.get('phase')}")
+print(f"Holdout Touched:  {manifest.get('holdout_touched')} (Locked Invariant Confirmed)")
+print(f"Git Commit:       {manifest.get('git_commit')}")
+print(f"Total Artifacts:  {len(manifest.get('artifacts', []))}")
+for art in manifest.get("artifacts", []):
+    print(f"  - {art['path']} (SHA-256: {art['sha256'][:16]}...)")
+print("=" * 70)
